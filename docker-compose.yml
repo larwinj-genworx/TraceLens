@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+  tracelens:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tracelens-platform
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
+    volumes:
+      - /tmp/tracelens_workspace:/tmp/tracelens_workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
