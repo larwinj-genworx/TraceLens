@@ -36,6 +36,7 @@ class BackendEndpoint(BaseModel):
     line: int | None = None
     path: str
     method: str
+    is_websocket: bool = False
     request_schema: str | None = None
     request_fields: list[SchemaField] = Field(default_factory=list)
     response_schema: str | None = None
@@ -91,6 +92,7 @@ class FlowApplicability(BaseModel):
     requires_mutating: bool = False
     path_markers_any: list[str] = Field(default_factory=list)
     requires_path_markers: bool = False
+    exclude_path_markers: list[str] = Field(default_factory=list)
     requires_sensitive_response: bool = False
     requires_sink: bool = False
     requires_auth_sensitive: bool = False

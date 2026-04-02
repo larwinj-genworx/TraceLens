@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Iterable
 
-from src.constants.defaults import SENSITIVE_FIELD_MARKERS
+from src.constants.defaults import is_sensitive_field_name
 from src.flows.catalog import FlowCatalogLoader
 from src.schemas.internal import (
     BackendEndpoint,
@@ -53,7 +53,7 @@ class MandatoryFlowAnalyzer:
                 sensitive_response_fields = [
                     field.name
                     for field in endpoint.response_fields
-                    if any(marker in field.name.lower() for marker in SENSITIVE_FIELD_MARKERS)
+                    if is_sensitive_field_name(field.name)
                 ]
                 combined_refs = sorted(set(endpoint_refs + global_refs))
 
@@ -125,12 +125,41 @@ class MandatoryFlowAnalyzer:
         )
 
     def _is_public_endpoint(self, path: str, public_markers: list[str]) -> bool:
+        """
+        Return True when *path* is considered a public (unauthenticated) endpoint.
+
+        Matching strategy (in order):
+        1. Exact string match.
+        2. Segment-aware sliding-window match: any contiguous window of segments
+           in the candidate path that equals the marker's segments counts as a
+           match.  This handles the common pattern where a global ``/api`` (or
+           ``/api/v1``) prefix is prepended to all routes:
+             - ``/api/auth/login`` matches marker ``/auth``  ✓
+             - ``/api/v1/login``   matches marker ``/login`` ✓
+             - ``/api/login_history`` does NOT match ``/login`` because
+               ``login_history`` ≠ ``login`` in exact segment comparison ✓
+        """
         normalized = path.strip()
         if not normalized:
             return False
         if normalized in public_markers:
             return True
-        return any(normalized.startswith(marker) for marker in public_markers)
+
+        candidate_parts = [p for p in normalized.split("/") if p]
+
+        for marker in public_markers:
+            marker_parts = [p for p in marker.split("/") if p]
+            if not marker_parts:
+                continue
+            depth = len(marker_parts)
+            if len(candidate_parts) < depth:
+                continue
+            # Slide a window of `depth` segments across the candidate path.
+            for i in range(len(candidate_parts) - depth + 1):
+                if candidate_parts[i : i + depth] == marker_parts:
+                    return True
+
+        return False
 
     def _build_endpoint_refs(self, endpoint: BackendEndpoint) -> list[str]:
         refs = []
@@ -166,6 +195,13 @@ class MandatoryFlowAnalyzer:
         applies = flow.applies_to
         method = endpoint.method.upper()
 
+        # WebSocket endpoints only participate in flows that explicitly list "WS"
+        # in their methods or use the wildcard "*".
+        if endpoint.is_websocket:
+            methods_upper = [m.upper() for m in applies.methods]
+            if "WS" not in methods_upper and "*" not in methods_upper:
+                return False
+
         methods = [item.upper() for item in applies.methods]
         if methods and "*" not in methods and method not in methods:
             return False
@@ -179,14 +215,21 @@ class MandatoryFlowAnalyzer:
         if applies.requires_sensitive_response and not sensitive_response_fields:
             return False
 
+        # Exclude specific path patterns (e.g. health checks, monitoring endpoints)
+        if applies.exclude_path_markers:
+            for excl in applies.exclude_path_markers:
+                excl_parts = [p for p in excl.split("/") if p]
+                candidate_parts = [p for p in endpoint.path.split("/") if p]
+                if not excl_parts:
+                    continue
+                depth = len(excl_parts)
+                if candidate_parts[:depth] == excl_parts:
+                    return False
+
         if applies.path_markers_any:
             has_marker = any(marker.lower() in endpoint.path.lower() for marker in applies.path_markers_any)
             if applies.requires_path_markers and not has_marker:
                 return False
-            if flow.id == "rate_limit_flow":
-                # For rate limit, evaluate public paths and auth paths.
-                if not is_public and not has_marker:
-                    return False
 
         if applies.requires_sink:
             sink_markers = flow.sink_markers or []
@@ -194,16 +237,16 @@ class MandatoryFlowAnalyzer:
                 return False
 
         if applies.requires_auth_sensitive:
-            auth_markers = ["auth", "jwt", "token", "session", "permission", "scope", "role"]
+            auth_markers = ["auth", "get_current", "session", "permission", "scope", "role"]
             if is_public and not self._has_any_marker(refs, auth_markers):
                 return False
 
+        # secret_pii_protection_flow: only applicable when the endpoint actually
+        # exposes sensitive fields in its response schema.  Ref-based signals
+        # (e.g. logger calls containing the substring "log") are too noisy and
+        # lead to false positives on health/utility endpoints.
         if flow.id == "secret_pii_protection_flow":
-            has_sensitive_signals = bool(sensitive_response_fields) or self._has_any_marker(
-                refs,
-                ["password", "secret", "token", "ssn", "credit", "authorization", "log"],
-            )
-            if not has_sensitive_signals:
+            if not sensitive_response_fields:
                 return False
 
         if flow.id == "response_contract_flow" and endpoint.method.upper() == "HEAD":
@@ -223,6 +266,35 @@ class MandatoryFlowAnalyzer:
 
         covered_hits = self._matched_markers(refs, covered_markers)
         ambiguous_hits = self._matched_markers(refs, ambiguous_markers)
+
+        # ── Authentication flow: only trust explicit Depends() injections ───────
+        # Module-level call refs (e.g. "decode_access_token" from a JWT helper)
+        # contain substrings like "token" that match broad covered_markers and
+        # create false coverage for every endpoint in the repo.  Instead, we
+        # require that at least one *dependency injection string* ("arg:func")
+        # matches a covered marker.  This is the only reliable signal that the
+        # route actually enforces an auth guard.
+        if flow.id == "authn_flow":
+            dep_refs = [r for r in refs if ":" in r]
+            dep_covered = self._matched_markers(dep_refs, covered_markers)
+            if dep_covered:
+                return (
+                    FlowStatus.COVERED,
+                    0.92,
+                    {"auth_deps": dep_refs, "covered_by": dep_covered},
+                )
+            dep_ambiguous = self._matched_markers(dep_refs, ambiguous_markers)
+            if dep_ambiguous:
+                return (
+                    FlowStatus.AMBIGUOUS,
+                    0.58,
+                    {"auth_deps": dep_refs, "ambiguous_hints": dep_ambiguous},
+                )
+            return (
+                FlowStatus.MISSING,
+                0.88,
+                {"auth_deps": dep_refs, "reason": "no_auth_dependency_found"},
+            )
 
         if flow.id == "request_validation_flow":
             if endpoint.request_schema:

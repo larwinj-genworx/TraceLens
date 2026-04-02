@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.constants.defaults import SENSITIVE_FIELD_MARKERS
+from src.constants.defaults import is_sensitive_field_name
 from src.schemas.internal import ServiceMatch
 
 
@@ -44,7 +44,13 @@ class ContractValidator:
             contract_fields = {field.name: field for field in endpoint.request_fields}
             payload_fields = call.payload_fields
 
-            if contract_fields:
+            # GET, DELETE and HEAD carry no request body.  Comparing payload fields
+            # against a schema captured from the function signature (e.g. a Depends()
+            # dependency type) would produce entirely spurious "missing_fields" /
+            # "extra_fields" issues on read-only endpoints.
+            body_method = endpoint.method.upper() not in {"GET", "DELETE", "HEAD"}
+
+            if contract_fields and body_method:
                 required_fields = {name for name, field in contract_fields.items() if field.required}
                 provided_fields = set(payload_fields.keys())
 
@@ -124,7 +130,7 @@ class ContractValidator:
                         }
                     )
 
-            elif payload_fields and endpoint.method.upper() in {"POST", "PUT", "PATCH"}:
+            elif payload_fields and body_method and endpoint.method.upper() in {"POST", "PUT", "PATCH"}:
                 issues.append(
                     {
                         "type": "missing_backend_schema",
@@ -190,5 +196,4 @@ class ContractValidator:
         return "unknown"
 
     def _is_sensitive(self, field_name: str) -> bool:
-        normalized = field_name.lower()
-        return any(marker in normalized for marker in SENSITIVE_FIELD_MARKERS)
+        return is_sensitive_field_name(field_name)
