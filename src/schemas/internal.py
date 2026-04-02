@@ -41,6 +41,11 @@ class BackendEndpoint(BaseModel):
     response_schema: str | None = None
     response_fields: list[SchemaField] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
+    function_name: str | None = None
+    decorators: list[str] = Field(default_factory=list)
+    call_refs: list[str] = Field(default_factory=list)
+    string_refs: list[str] = Field(default_factory=list)
+    has_try_except: bool = False
 
 
 class FrontendCall(BaseModel):
@@ -55,6 +60,13 @@ class FrontendCall(BaseModel):
     env_vars: list[str] = Field(default_factory=list)
 
 
+class FastAPIGlobalFacts(BaseModel):
+    middleware_refs: list[str] = Field(default_factory=list)
+    exception_handler_refs: list[str] = Field(default_factory=list)
+    global_dependencies: list[str] = Field(default_factory=list)
+    module_call_refs: list[str] = Field(default_factory=list)
+
+
 class StaticAnalysisResult(BaseModel):
     repo: str
     backend_endpoints: list[BackendEndpoint] = Field(default_factory=list)
@@ -62,6 +74,81 @@ class StaticAnalysisResult(BaseModel):
     env_references: list[str] = Field(default_factory=list)
     hardcoded_urls: list[str] = Field(default_factory=list)
     parser_errors: list[str] = Field(default_factory=list)
+    fastapi_facts: FastAPIGlobalFacts = Field(default_factory=FastAPIGlobalFacts)
+
+
+class FlowStatus(str, Enum):
+    COVERED = "covered"
+    MISSING = "missing"
+    AMBIGUOUS = "ambiguous"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class FlowApplicability(BaseModel):
+    methods: list[str] = Field(default_factory=lambda: ["*"])
+    include_public: bool = True
+    only_public: bool = False
+    requires_mutating: bool = False
+    path_markers_any: list[str] = Field(default_factory=list)
+    requires_path_markers: bool = False
+    requires_sensitive_response: bool = False
+    requires_sink: bool = False
+    requires_auth_sensitive: bool = False
+
+
+class FlowRuleDefinition(BaseModel):
+    id: str
+    title: str
+    description: str
+    issue_type: str
+    severity: str
+    applies_to: FlowApplicability = Field(default_factory=FlowApplicability)
+    covered_markers: list[str] = Field(default_factory=list)
+    ambiguous_markers: list[str] = Field(default_factory=list)
+    sink_markers: list[str] = Field(default_factory=list)
+    sanitizer_markers: list[str] = Field(default_factory=list)
+    missing_description: str
+    missing_impact: str
+    missing_fix: str
+
+
+class FlowCoverageItem(BaseModel):
+    flow_id: str
+    service: str
+    endpoint: str
+    file: str | None = None
+    line: int | None = None
+    status: FlowStatus
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class FlowSummaryItem(BaseModel):
+    flow_id: str
+    title: str
+    covered: int = 0
+    missing: int = 0
+    ambiguous: int = 0
+    not_applicable: int = 0
+
+
+class Observation(BaseModel):
+    flow_id: str
+    service: str
+    endpoint: str | None = None
+    file: str | None = None
+    line: int | None = None
+    message: str
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class MandatoryFlowResult(BaseModel):
+    catalog_version: str
+    flow_definitions: dict[str, FlowRuleDefinition] = Field(default_factory=dict)
+    flow_coverage: list[FlowCoverageItem] = Field(default_factory=list)
+    flow_summary: list[FlowSummaryItem] = Field(default_factory=list)
+    observations: list[Observation] = Field(default_factory=list)
 
 
 class EnvInferenceResult(BaseModel):
@@ -109,3 +196,8 @@ class AnalysisContext(BaseModel):
     graph_result: GraphBuildResult
     contract_issues: list[dict[str, Any]] = Field(default_factory=list)
     runtime_result: RuntimeExecutionResult | None = None
+    flow_catalog_version: str | None = None
+    flow_definitions: dict[str, FlowRuleDefinition] = Field(default_factory=dict)
+    flow_coverage: list[FlowCoverageItem] = Field(default_factory=list)
+    flow_summary: list[FlowSummaryItem] = Field(default_factory=list)
+    observations: list[Observation] = Field(default_factory=list)

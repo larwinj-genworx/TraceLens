@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 
-from src.constants.defaults import PUBLIC_PATH_MARKERS, SENSITIVE_FIELD_MARKERS
+from src.constants.defaults import SENSITIVE_FIELD_MARKERS
 from src.schemas.internal import AnalysisContext
 from src.schemas.issues import Issue, Severity
 
@@ -120,37 +120,7 @@ def rule_broken_service_connection(context: AnalysisContext) -> list[Issue]:
 
 
 def rule_missing_auth(context: AnalysisContext) -> list[Issue]:
-    issues: list[Issue] = []
-    protected_methods = {"POST", "PUT", "PATCH", "DELETE"}
-
-    for static in context.static_results.values():
-        for endpoint in static.backend_endpoints:
-            if endpoint.method.upper() not in protected_methods:
-                continue
-            if endpoint.path in PUBLIC_PATH_MARKERS:
-                continue
-            if any(endpoint.path.startswith(marker) for marker in PUBLIC_PATH_MARKERS):
-                continue
-            if _contains_auth_dependency(endpoint.dependencies):
-                continue
-
-            issues.append(
-                Issue(
-                    type="missing_auth",
-                    severity=Severity.CRITICAL,
-                    service=endpoint.service,
-                    endpoint=f"{endpoint.method} {endpoint.path}",
-                    file=endpoint.file,
-                    line=endpoint.line,
-                    description="Mutable endpoint is missing explicit auth/identity dependency.",
-                    evidence={"dependencies": endpoint.dependencies, "file": endpoint.file},
-                    impact="Unauthorized callers may execute privileged operations.",
-                    fix="Attach authentication/authorization dependency (e.g. JWT/session guard).",
-                    confidence=0.84,
-                )
-            )
-
-    return issues
+    return _issues_from_missing_flow_coverage(context, allowed_flow_ids={"authn_flow"})
 
 
 def rule_partial_mismatch(context: AnalysisContext) -> list[Issue]:
@@ -182,31 +152,14 @@ def rule_partial_mismatch(context: AnalysisContext) -> list[Issue]:
 
 
 def rule_missing_validation(context: AnalysisContext) -> list[Issue]:
-    issues: list[Issue] = []
+    return _issues_from_missing_flow_coverage(context, allowed_flow_ids={"request_validation_flow"})
 
-    for static in context.static_results.values():
-        for endpoint in static.backend_endpoints:
-            if endpoint.method.upper() not in {"POST", "PUT", "PATCH"}:
-                continue
-            if endpoint.request_schema:
-                continue
-            issues.append(
-                Issue(
-                    type="missing_validation",
-                    severity=Severity.HIGH,
-                    service=endpoint.service,
-                    endpoint=f"{endpoint.method} {endpoint.path}",
-                    file=endpoint.file,
-                    line=endpoint.line,
-                    description="Write endpoint has no explicit request schema validation.",
-                    evidence={"request_schema": endpoint.request_schema, "file": endpoint.file},
-                    impact="Malformed payloads can pass unchecked and corrupt downstream state.",
-                    fix="Introduce strict Pydantic request models and validation constraints.",
-                    confidence=0.81,
-                )
-            )
 
-    return issues
+def rule_mandatory_flow_violations(context: AnalysisContext) -> list[Issue]:
+    return _issues_from_missing_flow_coverage(
+        context,
+        skip_flow_ids={"authn_flow", "request_validation_flow"},
+    )
 
 
 def rule_hardcoded_configs(context: AnalysisContext) -> list[Issue]:
@@ -295,15 +248,58 @@ def rule_redundant_calls(context: AnalysisContext) -> list[Issue]:
     return issues
 
 
-def _contains_auth_dependency(dependencies: list[str]) -> bool:
-    markers = {"auth", "jwt", "token", "user", "session", "permission", "scope", "oauth"}
-    for dependency in dependencies:
-        lowered = dependency.lower()
-        if any(marker in lowered for marker in markers):
-            return True
-    return False
-
-
 def _is_sensitive_field_name(name: str) -> bool:
     lowered = name.lower()
     return any(marker in lowered for marker in SENSITIVE_FIELD_MARKERS)
+
+
+def _issues_from_missing_flow_coverage(
+    context: AnalysisContext,
+    allowed_flow_ids: set[str] | None = None,
+    skip_flow_ids: set[str] | None = None,
+) -> list[Issue]:
+    issues: list[Issue] = []
+
+    for item in context.flow_coverage:
+        if item.status.value != "missing":
+            continue
+        if allowed_flow_ids is not None and item.flow_id not in allowed_flow_ids:
+            continue
+        if skip_flow_ids and item.flow_id in skip_flow_ids:
+            continue
+
+        definition = context.flow_definitions.get(item.flow_id)
+        if definition is None:
+            continue
+
+        severity = _to_severity(definition.severity)
+        evidence = dict(item.evidence)
+        evidence["flow_id"] = item.flow_id
+        evidence["flow_title"] = definition.title
+
+        issues.append(
+            Issue(
+                type=definition.issue_type,
+                severity=severity,
+                service=item.service,
+                endpoint=item.endpoint,
+                file=item.file,
+                line=item.line,
+                description=definition.missing_description,
+                evidence=evidence,
+                impact=definition.missing_impact,
+                fix=definition.missing_fix,
+                confidence=max(0.5, float(item.confidence)),
+            )
+        )
+
+    return issues
+
+
+def _to_severity(raw: str) -> Severity:
+    lowered = raw.lower()
+    if lowered == Severity.CRITICAL.value:
+        return Severity.CRITICAL
+    if lowered == Severity.HIGH.value:
+        return Severity.HIGH
+    return Severity.MEDIUM

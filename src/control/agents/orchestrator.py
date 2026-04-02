@@ -9,6 +9,7 @@ import networkx as nx
 from src.analyzers.fastapi.parser import FastAPIParser
 from src.analyzers.react.parser import ReactParser
 from src.contracts.validator import ContractValidator
+from src.flows.analyzer import MandatoryFlowAnalyzer
 from src.llm.groq_client import GroqClient
 from src.observability.logging.setup import get_logger
 from src.rules.engine import RuleEngine
@@ -33,6 +34,7 @@ class ValidationOrchestrator:
         self.env_engine = EnvInferenceEngine()
         self.graph_builder = ServiceGraphBuilder()
         self.contract_validator = ContractValidator()
+        self.mandatory_flow_analyzer = MandatoryFlowAnalyzer()
         self.runtime_orchestrator = RuntimeOrchestrator()
         self.rule_engine = RuleEngine()
         self.groq_client = GroqClient()
@@ -98,6 +100,19 @@ class ValidationOrchestrator:
         await self._emit(progress_cb, "data_flow", "Performing end-to-end data flow validation")
         contract_issues.extend(self._validate_data_flow(graph_result, runtime_result))
 
+        await self._emit(progress_cb, "mandatory_flow_index", "Building mandatory-flow coverage index")
+        mandatory_flow_result = self.mandatory_flow_analyzer.evaluate(static_results, runtime_result=runtime_result)
+        await self._emit(
+            progress_cb,
+            "mandatory_flow_eval",
+            "Evaluating mandatory flow coverage across coding styles",
+            payload={
+                "catalog_version": mandatory_flow_result.catalog_version,
+                "coverage_count": len(mandatory_flow_result.flow_coverage),
+                "observation_count": len(mandatory_flow_result.observations),
+            },
+        )
+
         await self._emit(progress_cb, "rules", "Applying severity rule engine")
         context = AnalysisContext(
             repos=repos,
@@ -106,6 +121,11 @@ class ValidationOrchestrator:
             graph_result=graph_result,
             contract_issues=contract_issues,
             runtime_result=runtime_result,
+            flow_catalog_version=mandatory_flow_result.catalog_version,
+            flow_definitions=mandatory_flow_result.flow_definitions,
+            flow_coverage=mandatory_flow_result.flow_coverage,
+            flow_summary=mandatory_flow_result.flow_summary,
+            observations=mandatory_flow_result.observations,
         )
         issues = self.rule_engine.evaluate(context)
 
@@ -122,6 +142,9 @@ class ValidationOrchestrator:
             summary=summary,
             assumptions=sorted(set(assumptions)),
             issues=issues,
+            flow_summary=mandatory_flow_result.flow_summary,
+            flow_coverage=mandatory_flow_result.flow_coverage,
+            observations=mandatory_flow_result.observations,
         )
 
         await self._emit(progress_cb, "complete", "Analysis completed", payload={"summary": summary.model_dump()})
@@ -150,6 +173,7 @@ class ValidationOrchestrator:
             env_references=sorted(set(fastapi_result.env_references + react_result.env_references)),
             hardcoded_urls=sorted(set(fastapi_result.hardcoded_urls + react_result.hardcoded_urls)),
             parser_errors=fastapi_result.parser_errors + react_result.parser_errors,
+            fastapi_facts=fastapi_result.fastapi_facts,
         )
 
     def _graph_assumptions(self, graph: nx.DiGraph, graph_result) -> list[str]:

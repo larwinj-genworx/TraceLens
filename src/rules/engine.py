@@ -5,6 +5,7 @@ from src.rules.rules import (
     rule_contract_violations,
     rule_data_leakage,
     rule_hardcoded_configs,
+    rule_mandatory_flow_violations,
     rule_missing_auth,
     rule_missing_validation,
     rule_over_fetching,
@@ -25,6 +26,7 @@ class RuleEngine:
         generated.extend(rule_missing_auth(context))
         generated.extend(rule_partial_mismatch(context))
         generated.extend(rule_missing_validation(context))
+        generated.extend(rule_mandatory_flow_violations(context))
         generated.extend(rule_hardcoded_configs(context))
         generated.extend(rule_over_fetching(context))
         generated.extend(rule_redundant_calls(context))

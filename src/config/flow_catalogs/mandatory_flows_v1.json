@@ -1,0 +1,180 @@
+{
+  "version": "mandatory_flows_v1",
+  "public_path_markers": [
+    "/health",
+    "/docs",
+    "/openapi.json",
+    "/login",
+    "/signup",
+    "/register"
+  ],
+  "flows": [
+    {
+      "id": "authn_flow",
+      "title": "Authentication Coverage",
+      "description": "Ensure non-public routes enforce caller identity checks.",
+      "issue_type": "missing_auth",
+      "severity": "critical",
+      "applies_to": {
+        "methods": ["*"],
+        "include_public": false
+      },
+      "covered_markers": ["auth", "jwt", "token", "session", "oauth", "bearer", "current_user", "verify"],
+      "ambiguous_markers": ["user", "identity", "principal"],
+      "missing_description": "Endpoint is missing reliable authentication guard coverage.",
+      "missing_impact": "Unauthorized callers may invoke protected operations.",
+      "missing_fix": "Apply authentication dependency, middleware, decorator, or wrapper guard."
+    },
+    {
+      "id": "authz_flow",
+      "title": "Authorization Coverage",
+      "description": "Ensure mutating non-public routes enforce role/scope/permission checks.",
+      "issue_type": "missing_authz_flow",
+      "severity": "critical",
+      "applies_to": {
+        "methods": ["POST", "PUT", "PATCH", "DELETE"],
+        "include_public": false,
+        "requires_mutating": true
+      },
+      "covered_markers": ["authorize", "permission", "scope", "role", "acl", "rbac", "policy"],
+      "ambiguous_markers": ["admin", "staff", "privilege"],
+      "missing_description": "Endpoint is missing strong authorization checks.",
+      "missing_impact": "Authenticated but unauthorized actors may alter protected resources.",
+      "missing_fix": "Introduce role/scope policy checks via dependency, middleware, or service guard."
+    },
+    {
+      "id": "request_validation_flow",
+      "title": "Request Validation Coverage",
+      "description": "Ensure write routes validate incoming payloads.",
+      "issue_type": "missing_validation",
+      "severity": "high",
+      "applies_to": {
+        "methods": ["POST", "PUT", "PATCH"]
+      },
+      "covered_markers": ["basemodel", "validator", "field_validator", "model_validate", "validate", "schema"],
+      "ambiguous_markers": ["clean", "normalize", "parse"],
+      "missing_description": "Write endpoint lacks reliable request validation coverage.",
+      "missing_impact": "Malformed payloads can reach business logic and corrupt state.",
+      "missing_fix": "Use strict request DTOs or explicit validators before side effects."
+    },
+    {
+      "id": "response_contract_flow",
+      "title": "Response Contract Coverage",
+      "description": "Ensure routes return enforceable response contracts.",
+      "issue_type": "missing_response_contract_flow",
+      "severity": "high",
+      "applies_to": {
+        "methods": ["*"],
+        "requires_sensitive_response": false
+      },
+      "covered_markers": ["response_model", "model_dump", "schema", "dto", "serialize", "jsonable_encoder"],
+      "ambiguous_markers": ["dict", "json", "to_response"],
+      "missing_description": "Endpoint response path lacks enforceable response contract safeguards.",
+      "missing_impact": "Client/back-end drift can produce unstable integration behavior.",
+      "missing_fix": "Define response models or explicit response serialization contracts."
+    },
+    {
+      "id": "error_handling_flow",
+      "title": "Error Handling Coverage",
+      "description": "Ensure exceptions are handled consistently.",
+      "issue_type": "missing_error_handling_flow",
+      "severity": "high",
+      "applies_to": {
+        "methods": ["*"],
+        "include_public": true
+      },
+      "covered_markers": ["exception_handler", "httpexception", "try", "except", "error_handler", "raise"],
+      "ambiguous_markers": ["error", "fail", "fallback"],
+      "missing_description": "Endpoint lacks clear error handling coverage.",
+      "missing_impact": "Unhandled exceptions can return unstable or opaque failures.",
+      "missing_fix": "Add route-level or global exception handling with structured error payloads."
+    },
+    {
+      "id": "input_sanitization_flow",
+      "title": "Input Sanitization Coverage",
+      "description": "Ensure user input is sanitized before risky sinks.",
+      "issue_type": "missing_input_sanitization_flow",
+      "severity": "critical",
+      "applies_to": {
+        "methods": ["*"],
+        "requires_sink": true
+      },
+      "covered_markers": ["sanitize", "escape", "quote", "bleach", "clean"],
+      "ambiguous_markers": ["strip", "replace", "format"],
+      "sink_markers": ["execute", "raw", "subprocess", "os.system", "eval", "render_template", "text", "query"],
+      "sanitizer_markers": ["sanitize", "escape", "bleach", "quote", "clean"],
+      "missing_description": "Risky sink usage is not paired with clear sanitization signals.",
+      "missing_impact": "Unsanitized input may trigger injection or unsafe command execution.",
+      "missing_fix": "Sanitize/escape untrusted fields before SQL/template/command/file sinks."
+    },
+    {
+      "id": "secret_pii_protection_flow",
+      "title": "Secret and PII Protection",
+      "description": "Ensure sensitive fields are not exposed or logged without redaction.",
+      "issue_type": "missing_secret_pii_protection_flow",
+      "severity": "critical",
+      "applies_to": {
+        "methods": ["*"],
+        "include_public": true
+      },
+      "covered_markers": ["redact", "mask", "hash", "omit", "exclude", "filtered"],
+      "ambiguous_markers": ["hidden", "private", "secure"],
+      "missing_description": "Sensitive data handling lacks robust redaction/protection coverage.",
+      "missing_impact": "Secrets or PII may leak through API responses or logs.",
+      "missing_fix": "Mask, redact, or remove sensitive values in logs and responses."
+    },
+    {
+      "id": "rate_limit_flow",
+      "title": "Rate Limit Coverage",
+      "description": "Ensure public/auth endpoints apply abuse throttling controls.",
+      "issue_type": "missing_rate_limit_flow",
+      "severity": "high",
+      "applies_to": {
+        "methods": ["*"],
+        "include_public": true,
+        "only_public": false,
+        "path_markers_any": ["/login", "/signup", "/register", "/auth", "/token"]
+      },
+      "covered_markers": ["ratelimit", "rate_limit", "limiter", "throttle", "burst"],
+      "ambiguous_markers": ["quota", "budget", "retry_after"],
+      "missing_description": "Abuse-prone route lacks clear rate-limit controls.",
+      "missing_impact": "Traffic spikes or credential stuffing can degrade availability/security.",
+      "missing_fix": "Add route or middleware throttling policy for public/auth endpoints."
+    },
+    {
+      "id": "audit_trace_flow",
+      "title": "Audit and Trace Coverage",
+      "description": "Ensure sensitive operations are traceable through audit or request tracing.",
+      "issue_type": "missing_audit_trace_flow",
+      "severity": "medium",
+      "applies_to": {
+        "methods": ["POST", "PUT", "PATCH", "DELETE"],
+        "requires_mutating": true,
+        "requires_auth_sensitive": true
+      },
+      "covered_markers": ["audit", "trace", "request_id", "correlation", "span", "log"],
+      "ambiguous_markers": ["event", "history", "activity"],
+      "missing_description": "Sensitive state-changing path lacks auditable trace coverage.",
+      "missing_impact": "Incident investigation and accountability become difficult.",
+      "missing_fix": "Emit structured audit logs with request/correlation identifiers."
+    },
+    {
+      "id": "idempotency_tx_flow",
+      "title": "Idempotency and Transaction Safety",
+      "description": "Ensure high-risk mutating routes guard retries and partial side effects.",
+      "issue_type": "missing_idempotency_tx_flow",
+      "severity": "high",
+      "applies_to": {
+        "methods": ["POST", "PUT", "PATCH", "DELETE"],
+        "requires_mutating": true,
+        "path_markers_any": ["payment", "charge", "order", "invoice", "transaction", "transfer", "checkout", "purchase"],
+        "requires_path_markers": true
+      },
+      "covered_markers": ["idempotency", "transaction", "atomic", "commit", "rollback", "db.begin"],
+      "ambiguous_markers": ["retry", "once", "lock"],
+      "missing_description": "High-risk mutating endpoint lacks idempotency/transaction safeguards.",
+      "missing_impact": "Retries or partial failures can create duplicate or inconsistent state.",
+      "missing_fix": "Add idempotency keys and transaction boundaries for side-effect safety."
+    }
+  ]
+}

@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 from src.observability.logging.setup import get_logger
-from src.schemas.internal import BackendEndpoint, SchemaField, StaticAnalysisResult
+from src.schemas.internal import BackendEndpoint, FastAPIGlobalFacts, SchemaField, StaticAnalysisResult
 
 logger = get_logger(__name__)
 
@@ -23,6 +23,11 @@ class FastAPIParser:
         hardcoded_urls: set[str] = set()
         parser_errors: list[str] = []
 
+        middleware_refs: set[str] = set()
+        exception_handler_refs: set[str] = set()
+        global_dependencies: set[str] = set()
+        module_call_refs: set[str] = set()
+
         for file_path in self._iter_py_files(repo_path):
             try:
                 content = file_path.read_text(encoding="utf-8", errors="ignore")
@@ -36,8 +41,12 @@ class FastAPIParser:
             hardcoded_urls.update(URL_PATTERN.findall(content))
 
             try:
-                module_endpoints = self._parse_module(repo_name, repo_path, file_path, module_tree)
+                module_endpoints, module_facts = self._parse_module(repo_name, repo_path, file_path, module_tree)
                 endpoints.extend(module_endpoints)
+                middleware_refs.update(module_facts.middleware_refs)
+                exception_handler_refs.update(module_facts.exception_handler_refs)
+                global_dependencies.update(module_facts.global_dependencies)
+                module_call_refs.update(module_facts.module_call_refs)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("fastapi_module_parse_failed file=%s", file_path, extra={"request_id": "-"})
                 parser_errors.append(f"{file_path}: parser failure {exc}")
@@ -48,6 +57,12 @@ class FastAPIParser:
             env_references=sorted(env_references),
             hardcoded_urls=sorted(hardcoded_urls),
             parser_errors=parser_errors,
+            fastapi_facts=FastAPIGlobalFacts(
+                middleware_refs=sorted(middleware_refs),
+                exception_handler_refs=sorted(exception_handler_refs),
+                global_dependencies=sorted(global_dependencies),
+                module_call_refs=sorted(module_call_refs),
+            ),
         )
 
     def _parse_module(
@@ -56,10 +71,10 @@ class FastAPIParser:
         repo_path: Path,
         file_path: Path,
         tree: ast.Module,
-    ) -> list[BackendEndpoint]:
+    ) -> tuple[list[BackendEndpoint], FastAPIGlobalFacts]:
         pydantic_models = self._collect_pydantic_models(tree)
-        router_prefixes, app_names = self._collect_router_and_app_info(tree)
-        self._augment_router_prefixes_from_includes(tree, router_prefixes)
+        router_prefixes, router_dependencies, app_names, app_dependencies = self._collect_router_and_app_info(tree)
+        self._augment_router_info_from_includes(tree, router_prefixes, router_dependencies)
 
         endpoints: list[BackendEndpoint] = []
         for node in tree.body:
@@ -73,15 +88,31 @@ class FastAPIParser:
                     node=node,
                     pydantic_models=pydantic_models,
                     router_prefixes=router_prefixes,
+                    router_dependencies=router_dependencies,
                     app_names=app_names,
+                    app_dependencies=app_dependencies,
                 )
             )
 
-        return endpoints
+        module_facts = FastAPIGlobalFacts(
+            middleware_refs=sorted(self._collect_middleware_refs(tree)),
+            exception_handler_refs=sorted(self._collect_exception_handler_refs(tree)),
+            global_dependencies=sorted(
+                set(app_dependencies + [dep for deps in router_dependencies.values() for dep in deps])
+            ),
+            module_call_refs=sorted(self._collect_module_call_refs(tree)),
+        )
 
-    def _collect_router_and_app_info(self, tree: ast.Module) -> tuple[dict[str, str], set[str]]:
+        return endpoints, module_facts
+
+    def _collect_router_and_app_info(
+        self,
+        tree: ast.Module,
+    ) -> tuple[dict[str, str], dict[str, list[str]], set[str], list[str]]:
         router_prefixes: dict[str, str] = {}
+        router_dependencies: dict[str, list[str]] = {}
         app_names: set[str] = set()
+        app_dependencies: list[str] = []
 
         for node in tree.body:
             if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
@@ -90,17 +121,27 @@ class FastAPIParser:
                 continue
             if not isinstance(node.targets[0], ast.Name):
                 continue
+
             target_name = node.targets[0].id
             func_name = self._resolve_name(node.value.func)
+            dependencies = self._extract_dependencies_from_keyword(node.value.keywords, "dependencies")
+
             if func_name.endswith("APIRouter"):
                 prefix = self._extract_keyword_str(node.value.keywords, "prefix") or ""
                 router_prefixes[target_name] = prefix
+                router_dependencies[target_name] = dependencies
             elif func_name.endswith("FastAPI"):
                 app_names.add(target_name)
+                app_dependencies.extend(dependencies)
 
-        return router_prefixes, app_names
+        return router_prefixes, router_dependencies, app_names, sorted(set(app_dependencies))
 
-    def _augment_router_prefixes_from_includes(self, tree: ast.Module, router_prefixes: dict[str, str]) -> None:
+    def _augment_router_info_from_includes(
+        self,
+        tree: ast.Module,
+        router_prefixes: dict[str, str],
+        router_dependencies: dict[str, list[str]],
+    ) -> None:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -108,13 +149,21 @@ class FastAPIParser:
                 continue
             if node.func.attr != "include_router" or not node.args:
                 continue
+
             router_arg = node.args[0]
             if not isinstance(router_arg, ast.Name):
                 continue
+
             include_prefix = self._extract_keyword_str(node.keywords, "prefix") or ""
+            include_dependencies = self._extract_dependencies_from_keyword(node.keywords, "dependencies")
+
             if include_prefix:
                 current = router_prefixes.get(router_arg.id, "")
                 router_prefixes[router_arg.id] = f"{include_prefix}{current}"
+
+            if include_dependencies:
+                current_deps = router_dependencies.get(router_arg.id, [])
+                router_dependencies[router_arg.id] = sorted(set(current_deps + include_dependencies))
 
     def _collect_pydantic_models(self, tree: ast.Module) -> dict[str, list[SchemaField]]:
         models: dict[str, list[SchemaField]] = {}
@@ -149,12 +198,18 @@ class FastAPIParser:
         node: ast.FunctionDef | ast.AsyncFunctionDef,
         pydantic_models: dict[str, list[SchemaField]],
         router_prefixes: dict[str, str],
+        router_dependencies: dict[str, list[str]],
         app_names: set[str],
+        app_dependencies: list[str],
     ) -> list[BackendEndpoint]:
         extracted: list[BackendEndpoint] = []
 
         request_schema, request_fields = self._extract_request_schema(node, pydantic_models)
         arg_dependencies = self._extract_dependencies_from_args(node)
+        call_refs = self._extract_call_refs(node)
+        string_refs = self._extract_string_refs(node)
+        wrapper_decorators = self._extract_non_route_decorators(node.decorator_list)
+        has_try_except = self._contains_try_except(node)
 
         for decorator in node.decorator_list:
             if not isinstance(decorator, ast.Call) or not isinstance(decorator.func, ast.Attribute):
@@ -183,6 +238,13 @@ class FastAPIParser:
             response_schema = self._extract_response_schema(decorator)
             response_fields = pydantic_models.get(response_schema, []) if response_schema else []
             decorator_dependencies = self._extract_dependencies_from_decorator(decorator)
+            scoped_dependencies = list(arg_dependencies + decorator_dependencies)
+
+            if decorated_name in router_dependencies:
+                scoped_dependencies.extend(router_dependencies[decorated_name])
+            if decorated_name in app_names:
+                scoped_dependencies.extend(app_dependencies)
+
             rel_file = str(file_path.relative_to(repo_path))
             line_number = getattr(decorator, "lineno", None) or getattr(node, "lineno", None)
 
@@ -198,7 +260,12 @@ class FastAPIParser:
                         request_fields=request_fields,
                         response_schema=response_schema,
                         response_fields=response_fields,
-                        dependencies=sorted(set(arg_dependencies + decorator_dependencies)),
+                        dependencies=sorted(set(scoped_dependencies)),
+                        function_name=node.name,
+                        decorators=wrapper_decorators,
+                        call_refs=call_refs,
+                        string_refs=string_refs,
+                        has_try_except=has_try_except,
                     )
                 )
 
@@ -238,9 +305,14 @@ class FastAPIParser:
         return dependencies
 
     def _extract_dependencies_from_decorator(self, decorator: ast.Call) -> list[str]:
+        return self._extract_dependencies_from_keyword(decorator.keywords, "dependencies")
+
+    def _extract_dependencies_from_keyword(self, keywords: list[ast.keyword], key_name: str) -> list[str]:
         dependencies: list[str] = []
-        for kw in decorator.keywords:
-            if kw.arg != "dependencies" or not isinstance(kw.value, ast.List):
+        for kw in keywords:
+            if kw.arg != key_name:
+                continue
+            if not isinstance(kw.value, (ast.List, ast.Tuple)):
                 continue
             for item in kw.value.elts:
                 if not isinstance(item, ast.Call):
@@ -250,6 +322,88 @@ class FastAPIParser:
                 dependency_name = self._resolve_name(item.args[0]) if item.args else "Depends"
                 dependencies.append(dependency_name)
         return dependencies
+
+    def _extract_non_route_decorators(self, decorators: list[ast.expr]) -> list[str]:
+        names: list[str] = []
+        for decorator in decorators:
+            if isinstance(decorator, ast.Call):
+                if isinstance(decorator.func, ast.Attribute) and decorator.func.attr in HTTP_DECORATORS.union({"api_route"}):
+                    continue
+                names.append(self._resolve_name(decorator.func))
+                continue
+            names.append(self._resolve_name(decorator))
+        return sorted(set(filter(None, names)))
+
+    def _extract_call_refs(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
+        refs: set[str] = set()
+        for item in ast.walk(node):
+            if isinstance(item, ast.Call):
+                call_name = self._resolve_name(item.func)
+                if call_name:
+                    refs.add(call_name)
+        return sorted(refs)
+
+    def _extract_string_refs(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
+        refs: set[str] = set()
+        for item in ast.walk(node):
+            if isinstance(item, ast.Constant) and isinstance(item.value, str):
+                value = item.value.strip()
+                if not value or len(value) > 80:
+                    continue
+                refs.add(value)
+        return sorted(refs)
+
+    def _contains_try_except(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+        return any(isinstance(item, ast.Try) for item in ast.walk(node))
+
+    def _collect_middleware_refs(self, tree: ast.Module) -> set[str]:
+        refs: set[str] = set()
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for decorator in node.decorator_list:
+                    if isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Attribute):
+                        if decorator.func.attr == "middleware":
+                            refs.add(node.name)
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr != "add_middleware":
+                continue
+            if node.args:
+                refs.add(self._resolve_name(node.args[0]))
+            refs.add("add_middleware")
+
+        return refs
+
+    def _collect_exception_handler_refs(self, tree: ast.Module) -> set[str]:
+        refs: set[str] = set()
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call):
+                    continue
+                if not isinstance(decorator.func, ast.Attribute):
+                    continue
+                if decorator.func.attr != "exception_handler":
+                    continue
+                refs.add(node.name)
+                refs.add("exception_handler")
+                if decorator.args:
+                    refs.add(self._resolve_name(decorator.args[0]))
+        return refs
+
+    def _collect_module_call_refs(self, tree: ast.Module) -> set[str]:
+        refs: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                call_name = self._resolve_name(node.func)
+                if call_name:
+                    refs.add(call_name)
+        return refs
 
     def _extract_route_path(self, decorator: ast.Call) -> str:
         if decorator.args and isinstance(decorator.args[0], ast.Constant) and isinstance(decorator.args[0].value, str):
@@ -314,6 +468,8 @@ class FastAPIParser:
             return f"{left}.{node.attr}" if left else node.attr
         if isinstance(node, ast.Call):
             return self._resolve_name(node.func)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
         return ""
 
     def _normalize_path(self, path: str) -> str:
