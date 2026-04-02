@@ -10,6 +10,7 @@ from pathlib import Path
 from src.config.settings import settings
 from src.handlers.http_clients.github_client import GitHubClient
 from src.observability.logging.setup import get_logger
+from src.schemas.input import RepoInput
 from src.schemas.internal import RepoDescriptor, RepoType
 
 logger = get_logger(__name__)
@@ -36,21 +37,28 @@ class RepoLoader:
         self.workspace_root = workspace_root or settings.analysis_workspace
         self.workspace_root.mkdir(parents=True, exist_ok=True)
 
-    def load(self, urls: list[str]) -> tuple[list[RepoDescriptor], list[str]]:
+    def load(self, repos: list[RepoInput | str]) -> tuple[list[RepoDescriptor], list[str]]:
         assumptions: list[str] = []
         descriptors: list[RepoDescriptor] = []
 
-        for raw_url in urls:
-            url = str(raw_url)
+        for entry in repos:
+            if isinstance(entry, RepoInput):
+                url = entry.url
+                branch = entry.branch
+            else:
+                url = str(entry)
+                branch = None
+
             repo_name = GitHubClient.extract_repo_name(url)
-            unique_suffix = hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
+            cache_key = f"{url}#{branch or ''}"
+            unique_suffix = hashlib.sha1(cache_key.encode("utf-8")).hexdigest()[:8]
             target_dir = self.workspace_root / f"{repo_name}-{unique_suffix}"
 
             if target_dir.exists():
                 shutil.rmtree(target_dir)
 
             normalized_url = GitHubClient.normalize_repo_url(url)
-            clone_result = self._clone_repo(normalized_url, target_dir)
+            clone_result = self._clone_repo(normalized_url, target_dir, branch=branch)
             if clone_result is not None:
                 assumptions.append(f"Clone failed for {url}: {clone_result}. Continuing with partial analysis.")
                 descriptors.append(
@@ -90,15 +98,16 @@ class RepoLoader:
 
         return descriptors, assumptions
 
-    def _clone_repo(self, url: str, target_dir: Path) -> str | None:
+    def _clone_repo(self, url: str, target_dir: Path, *, branch: str | None = None) -> str | None:
         cmd = [
             "git",
             "clone",
             "--depth",
             str(settings.git_clone_depth),
-            url,
-            str(target_dir),
         ]
+        if branch:
+            cmd += ["--branch", branch]
+        cmd += [url, str(target_dir)]
         try:
             subprocess.run(
                 cmd,

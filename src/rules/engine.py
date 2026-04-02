@@ -5,12 +5,17 @@ from src.rules.rules import (
     rule_contract_violations,
     rule_data_leakage,
     rule_hardcoded_configs,
+    rule_idor_risk,
+    rule_insecure_defaults,
     rule_mandatory_flow_violations,
     rule_missing_auth,
+    rule_missing_service_auth,
     rule_missing_validation,
     rule_over_fetching,
     rule_partial_mismatch,
     rule_redundant_calls,
+    rule_unprotected_internal_endpoints,
+    rule_websocket_security,
 )
 from src.schemas.internal import AnalysisContext
 from src.schemas.issues import Issue, Severity
@@ -30,6 +35,12 @@ class RuleEngine:
         generated.extend(rule_hardcoded_configs(context))
         generated.extend(rule_over_fetching(context))
         generated.extend(rule_redundant_calls(context))
+        # Security-specific rules
+        generated.extend(rule_unprotected_internal_endpoints(context))
+        generated.extend(rule_idor_risk(context))
+        generated.extend(rule_missing_service_auth(context))
+        generated.extend(rule_websocket_security(context))
+        generated.extend(rule_insecure_defaults(context))
 
         deduped: list[Issue] = []
         seen: set[tuple[str, str, str | None, str]] = set()

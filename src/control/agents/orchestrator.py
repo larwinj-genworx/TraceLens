@@ -43,7 +43,7 @@ class ValidationOrchestrator:
         assumptions: list[str] = []
 
         await self._emit(progress_cb, "repo_loading", "Loading and cloning repositories")
-        repos, load_assumptions = self.repo_loader.load([str(item) for item in request.repos])
+        repos, load_assumptions = self.repo_loader.load(list(request.repos))
         assumptions.extend(load_assumptions)
 
         static_results: dict[str, StaticAnalysisResult] = {}

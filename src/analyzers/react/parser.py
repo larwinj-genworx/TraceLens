@@ -14,6 +14,27 @@ SUPPORTED_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
 ENV_PATTERN = re.compile(r"(?:process\.env|import\.meta\.env)\.([A-Z0-9_]+)")
 URL_PATTERN = re.compile(r"https?://[^'\"\s)]+")
 
+# Objects that are definitively not HTTP API clients.
+# Prevents false positives from DOM, console, native JS, and common UI objects.
+_NON_API_OBJECTS: frozenset[str] = frozenset({
+    "console", "window", "document", "process", "Object", "Array", "String",
+    "Math", "JSON", "Promise", "Error", "Date", "RegExp", "Set", "Map",
+    "parseInt", "parseFloat", "isNaN", "isFinite",
+    "localStorage", "sessionStorage", "navigator", "location", "history",
+    "performance", "crypto", "URL", "URLSearchParams",
+    "React", "ReactDOM", "router", "Router", "useRouter",
+    "fs", "path", "os", "util", "stream", "http", "https",
+    # already handled by dedicated extractors
+    "axios", "fetch",
+})
+
+# HTTP verb method names used for custom client detection
+_HTTP_VERB_METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
+
+# Detect `someObject.get(url, ...)` / `someObject.post(url, data, ...)` patterns
+# where someObject is not in _NON_API_OBJECTS.
+_CUSTOM_METHOD_PATTERN = re.compile(r"\b(\w+)\.(get|post|put|patch|delete|head|options)\s*\(")
+
 
 class ReactParser:
     def __init__(self) -> None:
@@ -44,9 +65,19 @@ class ReactParser:
 
             try:
                 rel_file = str(file_path.relative_to(repo_path))
-                frontend_calls.extend(self._extract_fetch_calls(repo_name, rel_file, content))
-                frontend_calls.extend(self._extract_axios_method_calls(repo_name, rel_file, content))
-                frontend_calls.extend(self._extract_axios_object_calls(repo_name, rel_file, content))
+                raw_calls: list[FrontendCall] = []
+                raw_calls.extend(self._extract_fetch_calls(repo_name, rel_file, content))
+                raw_calls.extend(self._extract_axios_method_calls(repo_name, rel_file, content))
+                raw_calls.extend(self._extract_axios_object_calls(repo_name, rel_file, content))
+                raw_calls.extend(self._extract_custom_http_calls(repo_name, rel_file, content))
+                # Deduplicate by (file, line, method, raw_url) – custom extractor can
+                # overlap with axios extractor on files that also import axios directly.
+                seen: set[tuple[str, int | None, str, str]] = set()
+                for call in raw_calls:
+                    key = (call.file, call.line, call.method, call.raw_url)
+                    if key not in seen:
+                        seen.add(key)
+                        frontend_calls.append(call)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("react_parser_failed file=%s", file_path, extra={"request_id": "-"})
                 parser_errors.append(f"{file_path}: parser failure {exc}")
@@ -147,6 +178,102 @@ class ReactParser:
                 )
             )
         return calls
+
+    def _extract_custom_http_calls(self, service: str, file: str, content: str) -> list[FrontendCall]:
+        """
+        Detect HTTP API calls made through custom client/service objects.
+
+        Covers patterns such as::
+
+            apiClient.get('/users')
+            httpService.post('/users', { name })
+            myApi.put(`/users/${id}`, payload)
+            request({ method: 'POST', url: '/endpoint' })
+
+        Objects in ``_NON_API_OBJECTS`` (DOM, console, stdlib, etc.) are skipped.
+        The first argument is validated to look like an API URL (starts with ``/``,
+        ``http://``, ``https://``, contains an env-var reference, or is a template
+        literal with a path-like string) to avoid false positives from unrelated
+        method calls.
+        """
+        calls: list[FrontendCall] = []
+
+        for match in _CUSTOM_METHOD_PATTERN.finditer(content):
+            obj_name = match.group(1)
+            method = match.group(2).upper()
+
+            # Skip non-API objects and single-character / purely upper-case names
+            # (likely a class constructor call like MyClass.get).
+            if obj_name.lower() in {n.lower() for n in _NON_API_OBJECTS}:
+                continue
+            if obj_name[0].isupper() or len(obj_name) <= 1:
+                continue
+
+            # Extract the argument list
+            args = self._extract_balanced_arguments(content, match.end() - 1)
+            if args is None:
+                continue
+
+            parts = self._split_top_level(args, ",", maxsplit=2)
+            url_expr = parts[0].strip() if parts else ""
+            if not url_expr:
+                continue
+
+            # Only proceed if the first argument looks like an API URL
+            if not self._looks_like_api_url(url_expr):
+                continue
+
+            raw_url = self._strip_wrapping_quotes(url_expr)
+            # For PUT/POST/PATCH the second arg is typically the payload
+            payload_expr = parts[1].strip() if len(parts) > 1 and method in {"POST", "PUT", "PATCH"} else ""
+            config_expr = parts[2].strip() if len(parts) > 2 else (parts[1].strip() if len(parts) > 1 else "")
+            headers_expr = self._find_option_expression(config_expr, "headers")
+
+            env_vars = sorted(set(ENV_PATTERN.findall(url_expr + "\n" + config_expr)))
+
+            calls.append(
+                FrontendCall(
+                    service=service,
+                    file=file,
+                    line=self._line_of_index(content, match.start()),
+                    raw_url=raw_url,
+                    method=method,
+                    payload_fields=self._extract_payload_fields(payload_expr),
+                    headers=self._extract_object_as_string_map(headers_expr),
+                    env_vars=env_vars,
+                )
+            )
+
+        return calls
+
+    def _looks_like_api_url(self, url_expr: str) -> bool:
+        """
+        Return True when an expression is very likely to be an HTTP API URL.
+
+        Accepts:
+        - String literals starting with ``/`` (relative path)
+        - String literals starting with ``http://`` / ``https://``
+        - Template literals containing ``/`` segments or env-var references
+        - Expressions referencing ``import.meta.env`` / ``process.env``
+        - Concatenations that include a ``/`` path fragment
+        """
+        stripped = self._strip_wrapping_quotes(url_expr.strip())
+        if stripped.startswith("/"):
+            return True
+        if stripped.startswith(("http://", "https://")):
+            return True
+        # Template literal: `${API_BASE}/users` or `/users/${id}`
+        if "`" in url_expr and ("${" in url_expr or re.search(r"/\w", url_expr)):
+            return True
+        # Env-var concatenation: import.meta.env.VITE_API_URL + "/users"
+        if "import.meta.env" in url_expr or "process.env" in url_expr:
+            return True
+        # String concatenation where one part is a path string: baseUrl + "/users"
+        if re.search(r'["\'][/\w][^"\']*["\']', url_expr):
+            candidate = re.search(r'["\']([^"\']+)["\']', url_expr)
+            if candidate and candidate.group(1).startswith("/"):
+                return True
+        return False
 
     def _extract_payload_fields(self, body_expr: str) -> dict[str, str]:
         if not body_expr:
