@@ -14,6 +14,15 @@ SUPPORTED_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
 ENV_PATTERN = re.compile(r"(?:process\.env|import\.meta\.env)\.([A-Z0-9_]+)")
 URL_PATTERN = re.compile(r"https?://[^'\"\s)]+")
 
+_BARE_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_$]\w*$")
+
+_NON_CONFIG_URL_HOSTS: frozenset[str] = frozenset({
+    "w3.org", "schema.org", "json-schema.org", "purl.org",
+    "openid.net", "xml.org", "xmlsoap.org", "xmlns.com",
+    "relaxng.org", "mozilla.org/MPL", "creativecommons.org",
+    "spdx.org", "semver.org",
+})
+
 # Objects that are definitively not HTTP API clients.
 # Prevents false positives from DOM, console, native JS, and common UI objects.
 _NON_API_OBJECTS: frozenset[str] = frozenset({
@@ -82,11 +91,16 @@ class ReactParser:
                 logger.exception("react_parser_failed file=%s", file_path, extra={"request_id": "-"})
                 parser_errors.append(f"{file_path}: parser failure {exc}")
 
+        filtered_urls = {
+            url for url in hardcoded_urls
+            if not self._is_non_config_url(url)
+        }
+
         return StaticAnalysisResult(
             repo=repo_name,
             frontend_calls=frontend_calls,
             env_references=sorted(env_references),
-            hardcoded_urls=sorted(hardcoded_urls),
+            hardcoded_urls=sorted(filtered_urls),
             parser_errors=parser_errors,
         )
 
@@ -108,14 +122,17 @@ class ReactParser:
             headers = self._extract_object_as_string_map(headers_expr)
             env_vars = sorted(set(ENV_PATTERN.findall(url_expr + "\n" + options_expr)))
 
+            raw_url = self._strip_wrapping_quotes(url_expr)
             calls.append(
                 FrontendCall(
                     service=service,
                     file=file,
                     line=self._line_of_index(content, start),
-                    raw_url=self._strip_wrapping_quotes(url_expr),
+                    raw_url=raw_url,
                     method=method.upper(),
                     payload_fields=payload_fields,
+                    payload_unresolved=self._is_unresolved_payload(body_expr, payload_fields),
+                    url_unresolved=self._is_bare_identifier(url_expr),
                     headers=headers,
                     env_vars=env_vars,
                 )
@@ -137,6 +154,7 @@ class ReactParser:
 
             headers_expr = self._find_option_expression(config_expr, "headers")
             headers = self._extract_object_as_string_map(headers_expr)
+            payload_fields = self._extract_payload_fields(payload_expr)
 
             calls.append(
                 FrontendCall(
@@ -145,7 +163,9 @@ class ReactParser:
                     line=self._line_of_index(content, match.start()),
                     raw_url=self._strip_wrapping_quotes(url_expr),
                     method=method,
-                    payload_fields=self._extract_payload_fields(payload_expr),
+                    payload_fields=payload_fields,
+                    payload_unresolved=self._is_unresolved_payload(payload_expr, payload_fields),
+                    url_unresolved=self._is_bare_identifier(url_expr),
                     headers=headers,
                     env_vars=sorted(set(ENV_PATTERN.findall(url_expr + "\n" + config_expr))),
                 )
@@ -164,6 +184,7 @@ class ReactParser:
             url_expr = self._find_option_expression(object_expr, "url") or ""
             data_expr = self._find_option_expression(object_expr, "data")
             headers_expr = self._find_option_expression(object_expr, "headers")
+            payload_fields = self._extract_payload_fields(data_expr)
 
             calls.append(
                 FrontendCall(
@@ -172,7 +193,9 @@ class ReactParser:
                     line=self._line_of_index(content, match.start()),
                     raw_url=self._strip_wrapping_quotes(url_expr),
                     method=method.upper(),
-                    payload_fields=self._extract_payload_fields(data_expr),
+                    payload_fields=payload_fields,
+                    payload_unresolved=self._is_unresolved_payload(data_expr, payload_fields),
+                    url_unresolved=self._is_bare_identifier(url_expr),
                     headers=self._extract_object_as_string_map(headers_expr),
                     env_vars=sorted(set(ENV_PATTERN.findall(object_expr))),
                 )
@@ -230,6 +253,7 @@ class ReactParser:
             headers_expr = self._find_option_expression(config_expr, "headers")
 
             env_vars = sorted(set(ENV_PATTERN.findall(url_expr + "\n" + config_expr)))
+            payload_fields = self._extract_payload_fields(payload_expr)
 
             calls.append(
                 FrontendCall(
@@ -238,7 +262,9 @@ class ReactParser:
                     line=self._line_of_index(content, match.start()),
                     raw_url=raw_url,
                     method=method,
-                    payload_fields=self._extract_payload_fields(payload_expr),
+                    payload_fields=payload_fields,
+                    payload_unresolved=self._is_unresolved_payload(payload_expr, payload_fields),
+                    url_unresolved=self._is_bare_identifier(url_expr),
                     headers=self._extract_object_as_string_map(headers_expr),
                     env_vars=env_vars,
                 )
@@ -543,6 +569,33 @@ class ReactParser:
                 continue
             files.append(path)
         return files
+
+    @staticmethod
+    def _is_unresolved_payload(body_expr: str, extracted_fields: dict[str, str]) -> bool:
+        """Return True when a body argument was provided but field extraction yielded nothing."""
+        if not body_expr or not body_expr.strip():
+            return False
+        if extracted_fields:
+            return False
+        stripped = body_expr.strip()
+        if stripped.startswith("{"):
+            return False
+        return True
+
+    @staticmethod
+    def _is_bare_identifier(url_expr: str) -> bool:
+        """Return True when the URL expression is a plain variable name."""
+        stripped = url_expr.strip()
+        if not stripped:
+            return False
+        unquoted = stripped.strip("'\"`")
+        return bool(_BARE_IDENTIFIER_RE.match(unquoted)) and "/" not in stripped
+
+    @staticmethod
+    def _is_non_config_url(url: str) -> bool:
+        """Return True for URLs that are not application config (SVG xmlns, XML schemas, etc.)."""
+        lowered = url.lower()
+        return any(host in lowered for host in _NON_CONFIG_URL_HOSTS)
 
     def _line_of_index(self, content: str, index: int) -> int:
         return content.count("\n", 0, index) + 1

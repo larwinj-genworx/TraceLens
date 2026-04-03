@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 
 from src.constants.defaults import is_sensitive_field_name
@@ -56,8 +57,10 @@ def rule_data_leakage(context: AnalysisContext) -> list[Issue]:
 
     for static in context.static_results.values():
         for endpoint in static.backend_endpoints:
+            redacted = set(endpoint.redacted_response_fields)
             sensitive_fields = [
-                field.name for field in endpoint.response_fields if _is_sensitive_field_name(field.name)
+                field.name for field in endpoint.response_fields
+                if _is_sensitive_field_name(field.name) and field.name not in redacted
             ]
             if not sensitive_fields:
                 continue
@@ -95,6 +98,8 @@ def rule_broken_service_connection(context: AnalysisContext) -> list[Issue]:
     issues: list[Issue] = []
 
     for unmatched in context.graph_result.unmatched_calls:
+        if unmatched.url_unresolved:
+            continue
         issues.append(
             Issue(
                 type="broken_service_connection",
@@ -204,7 +209,12 @@ def rule_hardcoded_configs(context: AnalysisContext) -> list[Issue]:
         if not hardcoded:
             continue
 
-        risky = [url for url in hardcoded if "localhost" in url or "127.0.0.1" in url or "http://" in url]
+        configurable = set(static.configurable_urls)
+        risky = [
+            url for url in hardcoded
+            if ("localhost" in url or "127.0.0.1" in url or "http://" in url)
+            and url not in configurable
+        ]
         if not risky:
             continue
 
@@ -449,6 +459,13 @@ def rule_idor_risk(context: AnalysisContext) -> list[Issue]:
         "/health", "/metrics", "/readiness", "/liveness", "/ping",
         "/docs", "/openapi",
     })
+    _SHARED_RESOURCE_MARKERS = frozenset({
+        "type", "types", "config", "configs", "setting", "settings",
+        "category", "categories", "status", "statuses", "enum", "enums",
+        "template", "templates", "role", "roles", "permission", "permissions",
+        "feature", "features", "plan", "plans", "tier", "tiers",
+        "tag", "tags", "label", "labels", "option", "options",
+    })
 
     issues: list[Issue] = []
 
@@ -482,37 +499,86 @@ def rule_idor_risk(context: AnalysisContext) -> list[Issue]:
             if has_ownership:
                 continue
 
-            issues.append(
-                Issue(
-                    type="missing_ownership_check",
-                    severity=Severity.CRITICAL,
-                    service=ep.service,
-                    endpoint=f"{ep.method} {ep.path}",
-                    file=ep.file,
-                    line=ep.line,
-                    description=(
-                        f"Authenticated endpoint {ep.method} {ep.path} accesses a resource "
-                        "by path parameter ID with no observable ownership or tenant-scoping check."
-                    ),
-                    evidence={
-                        "path": ep.path,
-                        "auth_deps": ep.dependencies,
-                        "call_refs_sample": ep.call_refs[:10],
-                    },
-                    impact=(
-                        "Any authenticated user can potentially read, update, or delete another "
-                        "user's or organization's resource by guessing or enumerating IDs (IDOR)."
-                    ),
-                    fix=(
-                        "Pass the authenticated caller's organisation/user ID into every service "
-                        "method that fetches by resource ID and assert the resource belongs to "
-                        "that caller before returning or mutating it."
-                    ),
-                    confidence=0.72,
+            is_shared = _is_shared_resource_path(ep.path, _SHARED_RESOURCE_MARKERS)
+
+            if is_shared:
+                issues.append(
+                    Issue(
+                        type="missing_ownership_check",
+                        severity=Severity.MEDIUM,
+                        service=ep.service,
+                        endpoint=f"{ep.method} {ep.path}",
+                        file=ep.file,
+                        line=ep.line,
+                        description=(
+                            f"Authenticated endpoint {ep.method} {ep.path} accesses a resource "
+                            "by path parameter ID. Resource appears to be shared catalog data; "
+                            "verify if per-user scoping is needed."
+                        ),
+                        evidence={
+                            "path": ep.path,
+                            "auth_deps": ep.dependencies,
+                            "call_refs_sample": ep.call_refs[:10],
+                            "shared_resource_hint": True,
+                        },
+                        impact=(
+                            "Shared/catalog resources may not need per-user ownership, "
+                            "but mutation endpoints (PUT/PATCH/DELETE) should still require "
+                            "appropriate role-based access control."
+                        ),
+                        fix=(
+                            "If this resource is truly shared (e.g. lookup tables, "
+                            "config categories), consider adding role-based guards for "
+                            "mutation. If it is user-scoped, add ownership checks."
+                        ),
+                        confidence=0.45,
+                    )
                 )
-            )
+            else:
+                issues.append(
+                    Issue(
+                        type="missing_ownership_check",
+                        severity=Severity.CRITICAL,
+                        service=ep.service,
+                        endpoint=f"{ep.method} {ep.path}",
+                        file=ep.file,
+                        line=ep.line,
+                        description=(
+                            f"Authenticated endpoint {ep.method} {ep.path} accesses a resource "
+                            "by path parameter ID with no observable ownership or tenant-scoping check."
+                        ),
+                        evidence={
+                            "path": ep.path,
+                            "auth_deps": ep.dependencies,
+                            "call_refs_sample": ep.call_refs[:10],
+                        },
+                        impact=(
+                            "Any authenticated user can potentially read, update, or delete another "
+                            "user's or organization's resource by guessing or enumerating IDs (IDOR)."
+                        ),
+                        fix=(
+                            "Pass the authenticated caller's organisation/user ID into every service "
+                            "method that fetches by resource ID and assert the resource belongs to "
+                            "that caller before returning or mutating it."
+                        ),
+                        confidence=0.72,
+                    )
+                )
 
     return issues
+
+
+def _is_shared_resource_path(path: str, markers: frozenset[str]) -> bool:
+    """Check if the path segment preceding a {param} is a shared resource type."""
+    segments = [s for s in path.lower().split("/") if s]
+    for i, seg in enumerate(segments):
+        if seg.startswith("{") and seg.endswith("}") and i > 0:
+            preceding = segments[i - 1]
+            # Check hyphenated segments (e.g. "dispute-types")
+            preceding_words = set(re.split(r"[-_]", preceding))
+            if preceding_words & markers:
+                return True
+    return False
 
 
 def rule_missing_service_auth(context: AnalysisContext) -> list[Issue]:
@@ -632,13 +698,16 @@ def rule_insecure_defaults(context: AnalysisContext) -> list[Issue]:
                 )
 
         # 2. Hardcoded HTTP (non-TLS) base URLs – only flag if they look like
-        #    real service URLs (not localhost/127.x which are expected in dev)
+        #    real service URLs (not localhost/127.x which are expected in dev,
+        #    and not env-overridable BaseSettings defaults)
+        configurable = set(static.configurable_urls)
         prod_http = [
             u for u in static.hardcoded_urls
             if u.startswith("http://")
             and "localhost" not in u
             and "127.0.0.1" not in u
             and "0.0.0.0" not in u
+            and u not in configurable
         ]
         if prod_http:
             key = (repo_name, "http_prod")

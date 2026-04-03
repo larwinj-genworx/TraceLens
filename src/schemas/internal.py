@@ -41,6 +41,7 @@ class BackendEndpoint(BaseModel):
     request_fields: list[SchemaField] = Field(default_factory=list)
     response_schema: str | None = None
     response_fields: list[SchemaField] = Field(default_factory=list)
+    redacted_response_fields: list[str] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
     function_name: str | None = None
     decorators: list[str] = Field(default_factory=list)
@@ -57,6 +58,8 @@ class FrontendCall(BaseModel):
     resolved_url: str | None = None
     method: str = "GET"
     payload_fields: dict[str, str] = Field(default_factory=dict)
+    payload_unresolved: bool = False
+    url_unresolved: bool = False
     headers: dict[str, str] = Field(default_factory=dict)
     env_vars: list[str] = Field(default_factory=list)
 
@@ -74,6 +77,7 @@ class StaticAnalysisResult(BaseModel):
     frontend_calls: list[FrontendCall] = Field(default_factory=list)
     env_references: list[str] = Field(default_factory=list)
     hardcoded_urls: list[str] = Field(default_factory=list)
+    configurable_urls: list[str] = Field(default_factory=list)
     parser_errors: list[str] = Field(default_factory=list)
     fastapi_facts: FastAPIGlobalFacts = Field(default_factory=FastAPIGlobalFacts)
 
@@ -170,6 +174,7 @@ class ServiceMatch(BaseModel):
 class GraphBuildResult(BaseModel):
     matches: list[ServiceMatch] = Field(default_factory=list)
     unmatched_calls: list[FrontendCall] = Field(default_factory=list)
+    external_calls: list[FrontendCall] = Field(default_factory=list)
     graph_edges: list[dict[str, Any]] = Field(default_factory=list)
 
 

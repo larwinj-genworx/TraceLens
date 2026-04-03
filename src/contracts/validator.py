@@ -54,8 +54,11 @@ class ContractValidator:
                 required_fields = {name for name, field in contract_fields.items() if field.required}
                 provided_fields = set(payload_fields.keys())
 
+                # When the frontend passes a variable/expression as the payload
+                # instead of an inline object literal, we cannot resolve its fields.
+                # Reporting all required fields as "missing" would be a false positive.
                 missing_fields = sorted(required_fields - provided_fields)
-                if missing_fields:
+                if missing_fields and not call.payload_unresolved:
                     issues.append(
                         {
                             "type": "missing_fields",
