@@ -47,6 +47,8 @@ class ServiceGraphBuilder:
             for repo in backend_repos
         }
 
+        external_calls: list[FrontendCall] = []
+
         for frontend in frontend_repos:
             frontend_result = static_results.get(frontend.name)
             if frontend_result is None:
@@ -55,6 +57,11 @@ class ServiceGraphBuilder:
             for call in frontend_result.frontend_calls:
                 resolved_url = self._resolve_call_url(call, frontend.name, env_result)
                 call_copy = call.model_copy(update={"resolved_url": resolved_url})
+
+                if self._is_external_call(call_copy, backend_repos):
+                    external_calls.append(call_copy)
+                    continue
+
                 candidate = self._best_match_for_call(call_copy, backend_repos, backend_endpoints_by_repo)
                 if candidate is None:
                     unmatched_calls.append(call_copy)
@@ -78,7 +85,47 @@ class ServiceGraphBuilder:
                     }
                 )
 
-        return graph, GraphBuildResult(matches=matches, unmatched_calls=unmatched_calls, graph_edges=edges)
+        return graph, GraphBuildResult(
+            matches=matches,
+            unmatched_calls=unmatched_calls,
+            external_calls=external_calls,
+            graph_edges=edges,
+        )
+
+    _KNOWN_EXTERNAL_DOMAINS: frozenset[str] = frozenset({
+        "thunderbird.net", "googleapis.com", "google.com",
+        "stripe.com", "stripe.dev", "github.com", "github.io",
+        "w3.org", "cloudflare.com", "twilio.com", "sendgrid.com",
+        "sentry.io", "datadoghq.com", "newrelic.com",
+        "auth0.com", "okta.com", "firebase.com", "firebaseio.com",
+        "amazonaws.com", "azure.com", "microsoft.com",
+        "facebook.com", "twitter.com", "linkedin.com",
+        "gravatar.com", "cdn.jsdelivr.net", "unpkg.com", "cdnjs.cloudflare.com",
+        "fonts.googleapis.com", "maps.googleapis.com",
+        "schema.org", "json-schema.org",
+    })
+
+    def _is_external_call(self, call: FrontendCall, backend_repos: list[RepoDescriptor]) -> bool:
+        """Return True when the call targets a third-party/external domain."""
+        resolved = call.resolved_url or call.raw_url
+        if not resolved or not resolved.startswith(("http://", "https://")):
+            return False
+
+        parsed = urlparse(resolved)
+        hostname = (parsed.hostname or "").lower()
+        if not hostname or hostname in {"localhost", "127.0.0.1", "0.0.0.0"}:
+            return False
+
+        if any(hostname.endswith(ext) or hostname == ext.lstrip(".") for ext in self._KNOWN_EXTERNAL_DOMAINS):
+            return True
+
+        for repo in backend_repos:
+            if repo.name.lower().replace("-", "").replace("_", "") in hostname.replace("-", "").replace("_", ""):
+                return False
+            if parsed.port and parsed.port in repo.detected_ports:
+                return False
+
+        return True
 
     def _resolve_call_url(self, call: FrontendCall, frontend_repo: str, env_result: EnvInferenceResult) -> str:
         raw = call.raw_url.strip()

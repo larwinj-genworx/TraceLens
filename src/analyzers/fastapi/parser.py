@@ -30,6 +30,13 @@ ENV_PATTERN = re.compile(r"os\.(?:getenv|environ\.get)\(\s*['\"]([A-Z0-9_]+)['\"
 ENV_PATTERN_ALT = re.compile(r"os\.environ\[['\"]([A-Z0-9_]+)['\"]\]")
 URL_PATTERN = re.compile(r"https?://[^'\"\s)]+")
 
+_NON_CONFIG_URL_HOSTS: frozenset[str] = frozenset({
+    "w3.org", "schema.org", "json-schema.org", "purl.org",
+    "openid.net", "xml.org", "xmlsoap.org", "xmlns.com",
+    "relaxng.org", "mozilla.org/MPL", "creativecommons.org",
+    "spdx.org", "semver.org",
+})
+
 # Max iterations for resolving chained include_router prefix chains (prevents infinite loops)
 _MAX_CHAIN_DEPTH = 8
 
@@ -60,6 +67,7 @@ class FastAPIParser:
         endpoints: list[BackendEndpoint] = []
         env_references: set[str] = set()
         hardcoded_urls: set[str] = set()
+        configurable_urls: set[str] = set()
         parser_errors: list[str] = []
 
         middleware_refs: set[str] = set()
@@ -78,8 +86,12 @@ class FastAPIParser:
                 continue
 
             env_references.update(ENV_PATTERN.findall(content))
+            file_urls = set(URL_PATTERN.findall(content))
+            filtered_urls = {u for u in file_urls if not self._is_non_config_url(u)}
+            settings_urls = self._collect_base_settings_urls(tree, content)
+            configurable_urls.update(settings_urls)
+            hardcoded_urls.update(filtered_urls - settings_urls)
             env_references.update(ENV_PATTERN_ALT.findall(content))
-            hardcoded_urls.update(URL_PATTERN.findall(content))
             file_asts[str(file_path)] = (file_path, tree)
 
         # ── Phase 1b: build cross-file context ─────────────────────────────
@@ -118,6 +130,7 @@ class FastAPIParser:
             backend_endpoints=endpoints,
             env_references=sorted(env_references),
             hardcoded_urls=sorted(hardcoded_urls),
+            configurable_urls=sorted(configurable_urls),
             parser_errors=parser_errors,
             fastapi_facts=FastAPIGlobalFacts(
                 middleware_refs=sorted(middleware_refs),
@@ -485,6 +498,7 @@ class FastAPIParser:
         string_refs = self._extract_string_refs(node)
         wrapper_decorators = self._extract_non_route_decorators(node.decorator_list)
         has_try_except = self._contains_try_except(node)
+        redacted_fields = self._detect_redacted_response_fields(node)
 
         for decorator in node.decorator_list:
             if not isinstance(decorator, ast.Call) or not isinstance(decorator.func, ast.Attribute):
@@ -545,6 +559,7 @@ class FastAPIParser:
                         request_fields=request_fields,
                         response_schema=response_schema,
                         response_fields=response_fields,
+                        redacted_response_fields=redacted_fields,
                         dependencies=sorted(set(scoped_dependencies)),
                         function_name=node.name,
                         decorators=wrapper_decorators,
@@ -685,6 +700,28 @@ class FastAPIParser:
     def _contains_try_except(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
         return any(isinstance(item, ast.Try) for item in ast.walk(node))
 
+    def _detect_redacted_response_fields(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
+        """
+        Detect response-object fields that are cleared/redacted before return.
+
+        Catches patterns like:
+            result.access_token = ""
+            result.field = None
+            response.secret = ""
+        """
+        redacted: set[str] = set()
+        for item in ast.walk(node):
+            if not isinstance(item, ast.Assign):
+                continue
+            for target in item.targets:
+                if not isinstance(target, ast.Attribute):
+                    continue
+                value = item.value
+                is_clear = isinstance(value, ast.Constant) and value.value in ("", None)
+                if is_clear:
+                    redacted.add(target.attr)
+        return sorted(redacted)
+
     def _collect_middleware_refs(self, tree: ast.Module) -> set[str]:
         refs: set[str] = set()
         for node in tree.body:
@@ -815,6 +852,29 @@ class FastAPIParser:
             return "/"
         normalized = re.sub(r"/{2,}", "/", path)
         return normalized if normalized.startswith("/") else f"/{normalized}"
+
+    @staticmethod
+    def _is_non_config_url(url: str) -> bool:
+        lowered = url.lower()
+        return any(host in lowered for host in _NON_CONFIG_URL_HOSTS)
+
+    def _collect_base_settings_urls(self, tree: ast.Module, content: str) -> set[str]:
+        """Collect URL strings found inside Pydantic BaseSettings class bodies."""
+        urls: set[str] = set()
+        lines = content.splitlines(keepends=True)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            if not any(
+                self._resolve_name(base).endswith("BaseSettings")
+                for base in node.bases
+            ):
+                continue
+            start = node.lineno - 1
+            end = node.end_lineno if hasattr(node, "end_lineno") and node.end_lineno else start + 1
+            class_text = "".join(lines[start:end])
+            urls.update(URL_PATTERN.findall(class_text))
+        return urls
 
     def _iter_py_files(self, repo_path: Path) -> list[Path]:
         files: list[Path] = []
