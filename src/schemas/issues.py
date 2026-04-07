@@ -12,6 +12,12 @@ class Severity(str, Enum):
     MEDIUM = "medium"
 
 
+class ConfidenceBand(str, Enum):
+    DETERMINISTIC = "deterministic"
+    CORROBORATED = "corroborated"
+    HEURISTIC = "heuristic"
+
+
 class Issue(BaseModel):
     type: str
     severity: Severity
@@ -24,3 +30,7 @@ class Issue(BaseModel):
     impact: str
     fix: str
     confidence: float = Field(default=0.8, ge=0.0, le=1.0)
+    confidence_band: ConfidenceBand = Field(default=ConfidenceBand.HEURISTIC)
+    advisory: bool = False
+    provenance: list[str] = Field(default_factory=list)
+    source: str | None = Field(default=None, description="Agent that produced this issue")

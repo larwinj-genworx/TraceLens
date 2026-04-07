@@ -15,6 +15,7 @@ from src.schemas.internal import (
     ServiceMatch,
     StaticAnalysisResult,
 )
+from src.utils.canonicalization import canonicalize_path, canonicalize_url_path
 
 logger = get_logger(__name__)
 
@@ -56,7 +57,11 @@ class ServiceGraphBuilder:
 
             for call in frontend_result.frontend_calls:
                 resolved_url = self._resolve_call_url(call, frontend.name, env_result)
-                call_copy = call.model_copy(update={"resolved_url": resolved_url})
+                call_copy = call.model_copy(update={
+                    "resolved_url": resolved_url,
+                    "canonical_url": canonicalize_url_path(resolved_url or call.raw_url),
+                    "canonical_path": canonicalize_url_path(resolved_url or call.raw_url),
+                })
 
                 if self._is_external_call(call_copy, backend_repos):
                     external_calls.append(call_copy)
@@ -197,7 +202,8 @@ class ServiceGraphBuilder:
         else:
             path = resolved if resolved.startswith("/") else f"/{resolved.lstrip('/')}"
 
-        path_score = self._path_similarity(path, endpoint.path)
+        endpoint_path = endpoint.canonical_path or endpoint.path
+        path_score = self._path_similarity(path, endpoint_path)
 
         # Hard gate: discard the candidate immediately if path similarity is too
         # weak regardless of how well host/port/method align.
@@ -268,7 +274,7 @@ class ServiceGraphBuilder:
         if tgt_len > src_len:
             # Symmetry: if target is longer try reversed direction with penalty
             score = self._suffix_segment_score(tgt_parts, src_parts)
-            return score * 0.85
+            return score * 0.95
 
         # Align tgt against the last tgt_len segments of src
         src_tail = src_parts[src_len - tgt_len:]
@@ -280,10 +286,10 @@ class ServiceGraphBuilder:
             if extra == 0:
                 return 1.0
             if extra == 1:
-                return 0.92
+                return 0.95
             if extra == 2:
-                return 0.84
-            return 0.76
+                return 0.90
+            return 0.82
 
         # Partial suffix match
         return matched / max(src_len, tgt_len)
@@ -344,7 +350,4 @@ class ServiceGraphBuilder:
         return bool(re.match(pattern, source))
 
     def _normalize_path(self, path: str) -> str:
-        normalized = re.sub(r"/{2,}", "/", path)
-        if not normalized.startswith("/"):
-            normalized = f"/{normalized}"
-        return normalized
+        return canonicalize_path(path)

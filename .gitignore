@@ -4,6 +4,7 @@ __pycache__/
 /tmp/
 .workspace/
 
+.traces/
 
 # Virtual environments
 .venv/

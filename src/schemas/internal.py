@@ -35,6 +35,7 @@ class BackendEndpoint(BaseModel):
     file: str
     line: int | None = None
     path: str
+    canonical_path: str | None = None
     method: str
     is_websocket: bool = False
     request_schema: str | None = None
@@ -48,6 +49,9 @@ class BackendEndpoint(BaseModel):
     call_refs: list[str] = Field(default_factory=list)
     string_refs: list[str] = Field(default_factory=list)
     has_try_except: bool = False
+    route_intent: str | None = None
+    auth_mode: str | None = None
+    ownership_mode: str | None = None
 
 
 class FrontendCall(BaseModel):
@@ -56,12 +60,23 @@ class FrontendCall(BaseModel):
     line: int | None = None
     raw_url: str
     resolved_url: str | None = None
+    canonical_url: str | None = None
+    canonical_path: str | None = None
     method: str = "GET"
     payload_fields: dict[str, str] = Field(default_factory=dict)
     payload_unresolved: bool = False
+    payload_resolution: str | None = None
     url_unresolved: bool = False
     headers: dict[str, str] = Field(default_factory=dict)
     env_vars: list[str] = Field(default_factory=list)
+
+
+class CorsConfig(BaseModel):
+    allow_origins: list[str] = Field(default_factory=list)
+    allow_methods: list[str] = Field(default_factory=list)
+    allow_headers: list[str] = Field(default_factory=list)
+    allow_credentials: bool = False
+    is_permissive: bool = False
 
 
 class FastAPIGlobalFacts(BaseModel):
@@ -69,6 +84,15 @@ class FastAPIGlobalFacts(BaseModel):
     exception_handler_refs: list[str] = Field(default_factory=list)
     global_dependencies: list[str] = Field(default_factory=list)
     module_call_refs: list[str] = Field(default_factory=list)
+    cors_config: CorsConfig | None = None
+
+
+class ClientStorageIssue(BaseModel):
+    storage_type: str
+    key: str
+    operation: str
+    file: str
+    line: int | None = None
 
 
 class StaticAnalysisResult(BaseModel):
@@ -80,6 +104,7 @@ class StaticAnalysisResult(BaseModel):
     configurable_urls: list[str] = Field(default_factory=list)
     parser_errors: list[str] = Field(default_factory=list)
     fastapi_facts: FastAPIGlobalFacts = Field(default_factory=FastAPIGlobalFacts)
+    client_storage_issues: list[ClientStorageIssue] = Field(default_factory=list)
 
 
 class FlowStatus(str, Enum):
@@ -196,6 +221,16 @@ class RuntimeExecutionResult(BaseModel):
     errors: list[str] = Field(default_factory=list)
 
 
+class TypeDiagnostic(BaseModel):
+    repo: str
+    tool: str
+    status: str
+    message: str
+    file: str | None = None
+    line: int | None = None
+    code: str | None = None
+
+
 class AnalysisContext(BaseModel):
     repos: list[RepoDescriptor]
     static_results: dict[str, StaticAnalysisResult]
@@ -208,3 +243,4 @@ class AnalysisContext(BaseModel):
     flow_coverage: list[FlowCoverageItem] = Field(default_factory=list)
     flow_summary: list[FlowSummaryItem] = Field(default_factory=list)
     observations: list[Observation] = Field(default_factory=list)
+    type_diagnostics: list[TypeDiagnostic] = Field(default_factory=list)

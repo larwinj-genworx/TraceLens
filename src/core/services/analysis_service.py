@@ -13,5 +13,10 @@ class AnalysisService:
     def __init__(self) -> None:
         self.orchestrator = ValidationOrchestrator()
 
-    async def analyze(self, request: AnalysisRequest, progress_cb: ProgressCallback | None = None) -> AnalysisReport:
-        return await self.orchestrator.run(request, progress_cb=progress_cb)
+    async def analyze(
+        self,
+        request: AnalysisRequest,
+        progress_cb: ProgressCallback | None = None,
+        job_id: str | None = None,
+    ) -> AnalysisReport:
+        return await self.orchestrator.run(request, progress_cb=progress_cb, job_id=job_id)

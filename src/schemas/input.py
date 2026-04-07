@@ -1,15 +1,25 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, HttpUrl, field_validator
+from typing import Literal
+
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 
 class RepoInput(BaseModel):
     """A single repository to analyse, with an optional branch override."""
 
-    url: str = Field(..., description="Git repository URL (https:// or git@).")
+    url: str = Field(default="", description="Git repository URL (https:// or git@).")
     branch: str | None = Field(
         default=None,
         description="Branch to clone. Omit to use the remote's default branch.",
+    )
+    source_type: Literal["git", "zip"] = Field(
+        default="git",
+        description="How the repo was provided: 'git' for URL clone, 'zip' for uploaded archive.",
+    )
+    local_path: str | None = Field(
+        default=None,
+        description="Pre-extracted directory path (set by upload handler for zip sources).",
     )
 
     @field_validator("url")
@@ -17,7 +27,7 @@ class RepoInput(BaseModel):
     def validate_url(cls, value: str) -> str:
         value = value.strip()
         if not value:
-            raise ValueError("Repository URL cannot be empty.")
+            return value
         if not (
             value.startswith("http://")
             or value.startswith("https://")
@@ -25,6 +35,14 @@ class RepoInput(BaseModel):
         ):
             raise ValueError(f"Unsupported repository URL format: {value!r}")
         return value
+
+    @model_validator(mode="after")
+    def validate_source(self) -> RepoInput:
+        if self.source_type == "git" and not self.url:
+            raise ValueError("Repository URL cannot be empty for git source.")
+        if self.source_type == "zip" and not self.local_path:
+            raise ValueError("local_path is required for zip source.")
+        return self
 
     @field_validator("branch")
     @classmethod
@@ -62,6 +80,5 @@ class AnalysisRequest(BaseModel):
             elif isinstance(item, dict):
                 out.append(RepoInput(**item))
             else:
-                # Plain URL string or pydantic HttpUrl
                 out.append(RepoInput(url=str(item)))
         return out

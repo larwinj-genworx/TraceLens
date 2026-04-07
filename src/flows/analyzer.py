@@ -16,6 +16,13 @@ from src.schemas.internal import (
     RuntimeExecutionResult,
     StaticAnalysisResult,
 )
+from src.utils.canonicalization import (
+    canonicalize_path,
+    classify_auth_mode,
+    classify_ownership_mode,
+    classify_route_intent,
+    detect_auth_middleware,
+)
 
 
 class MandatoryFlowAnalyzer:
@@ -46,9 +53,23 @@ class MandatoryFlowAnalyzer:
                 + static.fastapi_facts.module_call_refs
             )
 
+            auth_middleware = self._detect_auth_middleware(static.fastapi_facts.middleware_refs)
+
             for endpoint in static.backend_endpoints:
+                endpoint.canonical_path = endpoint.canonical_path or canonicalize_path(endpoint.path)
                 endpoint_refs = self._build_endpoint_refs(endpoint)
-                is_public = self._is_public_endpoint(endpoint.path, catalog.public_path_markers)
+                endpoint.route_intent = endpoint.route_intent or classify_route_intent(
+                    endpoint.path,
+                    endpoint.method,
+                    endpoint_refs + global_refs,
+                )
+                endpoint.auth_mode = classify_auth_mode(endpoint, static.fastapi_facts)
+                endpoint.ownership_mode = classify_ownership_mode(endpoint)
+                is_public = self._is_public_endpoint(
+                    endpoint.path,
+                    catalog.public_path_markers,
+                    endpoint.route_intent,
+                )
                 is_mutating = endpoint.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
                 sensitive_response_fields = [
                     field.name
@@ -81,7 +102,10 @@ class MandatoryFlowAnalyzer:
                         )
                         continue
 
-                    status, confidence, evidence = self._evaluate_flow(flow, endpoint, combined_refs, sensitive_response_fields)
+                    status, confidence, evidence = self._evaluate_flow(
+                        flow, endpoint, combined_refs, sensitive_response_fields,
+                        auth_middleware=auth_middleware,
+                    )
                     confidence = self._enrich_confidence(
                         status=status,
                         confidence=confidence,
@@ -124,7 +148,12 @@ class MandatoryFlowAnalyzer:
             observations=observations,
         )
 
-    def _is_public_endpoint(self, path: str, public_markers: list[str]) -> bool:
+    def _is_public_endpoint(
+        self,
+        path: str,
+        public_markers: list[str],
+        route_intent: str | None = None,
+    ) -> bool:
         """
         Return True when *path* is considered a public (unauthenticated) endpoint.
 
@@ -139,7 +168,10 @@ class MandatoryFlowAnalyzer:
              - ``/api/login_history`` does NOT match ``/login`` because
                ``login_history`` ≠ ``login`` in exact segment comparison ✓
         """
-        normalized = path.strip()
+        if route_intent in {"public_meta", "auth_entry"}:
+            return True
+
+        normalized = canonicalize_path(path).strip()
         if not normalized:
             return False
         if normalized in public_markers:
@@ -252,6 +284,9 @@ class MandatoryFlowAnalyzer:
         if flow.id == "response_contract_flow" and endpoint.method.upper() == "HEAD":
             return False
 
+        if flow.id == "rate_limit_flow" and (endpoint.route_intent or "") != "auth_entry":
+            return False
+
         return True
 
     def _evaluate_flow(
@@ -260,6 +295,7 @@ class MandatoryFlowAnalyzer:
         endpoint: BackendEndpoint,
         refs: list[str],
         sensitive_response_fields: list[str],
+        auth_middleware: list[str] | None = None,
     ) -> tuple[FlowStatus, float, dict]:
         covered_markers = flow.covered_markers
         ambiguous_markers = flow.ambiguous_markers
@@ -267,33 +303,109 @@ class MandatoryFlowAnalyzer:
         covered_hits = self._matched_markers(refs, covered_markers)
         ambiguous_hits = self._matched_markers(refs, ambiguous_markers)
 
-        # ── Authentication flow: only trust explicit Depends() injections ───────
-        # Module-level call refs (e.g. "decode_access_token" from a JWT helper)
-        # contain substrings like "token" that match broad covered_markers and
-        # create false coverage for every endpoint in the repo.  Instead, we
-        # require that at least one *dependency injection string* ("arg:func")
-        # matches a covered marker.  This is the only reliable signal that the
-        # route actually enforces an auth guard.
+        # ── Authentication flow: check deps, decorator/router deps, and middleware
+        # We use endpoint.dependencies directly (covers arg-injected "arg:func",
+        # decorator "dependencies=[Depends(func)]", and router-level deps) rather
+        # than filtering combined_refs by ":" which missed decorator/router deps.
+        # After dependency checks, we also check for auth middleware registered on
+        # the service (e.g. JWTMiddleware) which provides global auth coverage.
         if flow.id == "authn_flow":
-            dep_refs = [r for r in refs if ":" in r]
+            base_evidence = {
+                "auth_mode": endpoint.auth_mode,
+                "route_intent": endpoint.route_intent,
+                "canonical_path": endpoint.canonical_path,
+                "auth_deps": endpoint.dependencies,
+            }
+            if endpoint.auth_mode == "public":
+                return (
+                    FlowStatus.COVERED,
+                    1.0,
+                    {**base_evidence, "covered_by": ["public_route"]},
+                )
+            if endpoint.auth_mode == "service_auth":
+                return (
+                    FlowStatus.COVERED,
+                    0.94,
+                    {**base_evidence, "covered_by": ["service_auth"]},
+                )
+            if endpoint.auth_mode == "middleware_auth":
+                return (
+                    FlowStatus.COVERED,
+                    0.90,
+                    {
+                        **base_evidence,
+                        "auth_middleware": auth_middleware,
+                        "covered_by": ["middleware"],
+                    },
+                )
+            if endpoint.auth_mode == "user_auth":
+                return (
+                    FlowStatus.COVERED,
+                    0.92,
+                    {**base_evidence, "covered_by": covered_hits or ["user_auth"]},
+                )
+            if endpoint.auth_mode == "ambiguous":
+                return (
+                    FlowStatus.AMBIGUOUS,
+                    0.58,
+                    {**base_evidence, "ambiguous_hints": ambiguous_hits or ["identity_marker"]},
+                )
+
+            dep_refs = self._normalize_values(endpoint.dependencies)
             dep_covered = self._matched_markers(dep_refs, covered_markers)
             if dep_covered:
                 return (
                     FlowStatus.COVERED,
                     0.92,
-                    {"auth_deps": dep_refs, "covered_by": dep_covered},
+                    {**base_evidence, "covered_by": dep_covered},
                 )
+
+            if auth_middleware:
+                return (
+                    FlowStatus.COVERED,
+                    0.90,
+                    {
+                        **base_evidence,
+                        "auth_middleware": auth_middleware,
+                        "covered_by": "middleware",
+                    },
+                )
+
             dep_ambiguous = self._matched_markers(dep_refs, ambiguous_markers)
             if dep_ambiguous:
                 return (
                     FlowStatus.AMBIGUOUS,
                     0.58,
-                    {"auth_deps": dep_refs, "ambiguous_hints": dep_ambiguous},
+                    {**base_evidence, "ambiguous_hints": dep_ambiguous},
                 )
             return (
                 FlowStatus.MISSING,
                 0.88,
-                {"auth_deps": dep_refs, "reason": "no_auth_dependency_found"},
+                {**base_evidence, "reason": "no_auth_dependency_found"},
+            )
+
+        if flow.id == "ownership_flow":
+            base_evidence = {
+                "ownership_mode": endpoint.ownership_mode,
+                "route_intent": endpoint.route_intent,
+                "canonical_path": endpoint.canonical_path,
+            }
+            if endpoint.ownership_mode == "covered":
+                return (
+                    FlowStatus.COVERED,
+                    0.9,
+                    {**base_evidence, "covered_hits": covered_hits or endpoint.call_refs[:8]},
+                )
+            if endpoint.ownership_mode == "ambiguous":
+                return (
+                    FlowStatus.AMBIGUOUS,
+                    0.58,
+                    {**base_evidence, "ambiguous_hits": ambiguous_hits or endpoint.call_refs[:8]},
+                )
+            return (
+                FlowStatus.MISSING,
+                0.86,
+                {**base_evidence, "covered_hits": covered_hits, "ambiguous_hits": ambiguous_hits},
             )
 
         if flow.id == "request_validation_flow":
@@ -320,7 +432,11 @@ class MandatoryFlowAnalyzer:
             return (
                 FlowStatus.COVERED,
                 0.88,
-                {"covered_by": ["try_except"]},
+                {
+                    "route_intent": endpoint.route_intent,
+                    "canonical_path": endpoint.canonical_path,
+                    "covered_by": ["try_except"],
+                },
             )
 
         if flow.id == "input_sanitization_flow":
@@ -342,7 +458,12 @@ class MandatoryFlowAnalyzer:
                 return (
                     FlowStatus.MISSING,
                     0.87,
-                    {"sink_hits": sink_hits, "sanitizer_hits": []},
+                    {
+                        "route_intent": endpoint.route_intent,
+                        "canonical_path": endpoint.canonical_path,
+                        "sink_hits": sink_hits,
+                        "sanitizer_hits": [],
+                    },
                 )
 
         if flow.id == "secret_pii_protection_flow" and sensitive_response_fields:
@@ -377,20 +498,33 @@ class MandatoryFlowAnalyzer:
             return (
                 FlowStatus.COVERED,
                 0.82,
-                {"covered_hits": covered_hits},
+                {
+                    "route_intent": endpoint.route_intent,
+                    "canonical_path": endpoint.canonical_path,
+                    "covered_hits": covered_hits,
+                },
             )
 
         if ambiguous_hits:
             return (
                 FlowStatus.AMBIGUOUS,
                 0.55,
-                {"ambiguous_hits": ambiguous_hits},
+                {
+                    "route_intent": endpoint.route_intent,
+                    "canonical_path": endpoint.canonical_path,
+                    "ambiguous_hits": ambiguous_hits,
+                },
             )
 
         return (
             FlowStatus.MISSING,
             0.84,
-            {"covered_hits": [], "ambiguous_hits": []},
+            {
+                "route_intent": endpoint.route_intent,
+                "canonical_path": endpoint.canonical_path,
+                "covered_hits": [],
+                "ambiguous_hits": [],
+            },
         )
 
     def _has_any_marker(self, refs: list[str], markers: list[str]) -> bool:
@@ -405,6 +539,10 @@ class MandatoryFlowAnalyzer:
                     hits.add(marker)
                     break
         return sorted(hits)
+
+    def _detect_auth_middleware(self, middleware_refs: list[str]) -> list[str]:
+        """Return middleware names that indicate authentication enforcement."""
+        return detect_auth_middleware(middleware_refs)
 
     def _summarize_coverage(
         self,
@@ -440,7 +578,7 @@ class MandatoryFlowAnalyzer:
             return {}
         index: dict[tuple[str, str], tuple[int | None, str | None]] = {}
         for probe in runtime_result.probes:
-            index[(probe.method.upper(), self._extract_path(probe.url))] = (probe.status_code, probe.error)
+            index[(probe.method.upper(), canonicalize_path(self._extract_path(probe.url)))] = (probe.status_code, probe.error)
         return index
 
     def _extract_path(self, url: str) -> str:
@@ -463,7 +601,7 @@ class MandatoryFlowAnalyzer:
         endpoint: BackendEndpoint,
         probe_index: dict[tuple[str, str], tuple[int | None, str | None]],
     ) -> float:
-        key = (endpoint.method.upper(), endpoint.path)
+        key = (endpoint.method.upper(), endpoint.canonical_path or canonicalize_path(endpoint.path))
         status_code, error = probe_index.get(key, (None, None))
 
         updated = confidence
