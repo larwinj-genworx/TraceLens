@@ -125,7 +125,6 @@ _OWNERSHIP_MARKERS = frozenset({
 })
 _OWNERSHIP_AMBIGUOUS_MARKERS = frozenset({"permission", "can_access", "has_access", "access_check"})
 
-_TRAILING_QUERY_TEMPLATE_RE = re.compile(r"(?:\$\{[^}]+\}|\{[^}/]+\}|:[A-Za-z_][\w]*)+$")
 _TRAILING_CONCAT_RE = re.compile(r"(?:\s*\+\s*[A-Za-z_$][\w.$]*)+$")
 _PLACEHOLDER_SEGMENT_RE = re.compile(r"^\$?\{[^}]+\}$|^[A-Z][A-Z0-9_]*$|^:[A-Za-z_][\w]*$")
 
@@ -145,11 +144,15 @@ def normalize_static_results(static_results: dict[str, StaticAnalysisResult]) ->
 
 
 def canonicalize_url(url: str) -> str:
-    path = canonicalize_url_path(url)
+    path = canonicalize_frontend_url_path(url)
     return path
 
 
 def canonicalize_url_path(url_or_path: str) -> str:
+    return canonicalize_frontend_url_path(url_or_path)
+
+
+def canonicalize_frontend_url_path(url_or_path: str) -> str:
     raw = (url_or_path or "").strip().strip('"\'`')
     if not raw:
         return "/"
@@ -158,13 +161,23 @@ def canonicalize_url_path(url_or_path: str) -> str:
         raw = parsed.path or "/"
     raw = raw.split("#", 1)[0]
     raw = raw.split("?", 1)[0]
-    raw = _TRAILING_QUERY_TEMPLATE_RE.sub("", raw).strip()
     raw = _TRAILING_CONCAT_RE.sub("", raw).strip()
     if not raw.startswith("/"):
         raw = f"/{raw.lstrip('/')}"
     raw = re.sub(r"/{2,}", "/", raw)
 
     parts = [part for part in raw.split("/") if part]
+    normalized_parts: list[str] = []
+    for part in parts:
+        if _PLACEHOLDER_SEGMENT_RE.match(part):
+            normalized_parts.append("{param}")
+            continue
+        if "${" in part:
+            normalized_parts.append("{param}")
+            continue
+        normalized_parts.append(part)
+
+    parts = normalized_parts
     while parts and _PLACEHOLDER_SEGMENT_RE.match(parts[0]):
         parts.pop(0)
     normalized = "/" + "/".join(parts) if parts else "/"
@@ -174,7 +187,24 @@ def canonicalize_url_path(url_or_path: str) -> str:
 
 
 def canonicalize_path(path: str) -> str:
-    return canonicalize_url_path(path)
+    return canonicalize_backend_path(path)
+
+
+def canonicalize_backend_path(path: str) -> str:
+    raw = (path or "").strip().strip('"\'`')
+    if not raw:
+        return "/"
+    if raw.startswith(("http://", "https://")):
+        parsed = urlparse(raw)
+        raw = parsed.path or "/"
+    raw = raw.split("#", 1)[0]
+    raw = raw.split("?", 1)[0]
+    if not raw.startswith("/"):
+        raw = f"/{raw.lstrip('/')}"
+    raw = re.sub(r"/{2,}", "/", raw)
+    if len(raw) > 1:
+        raw = raw.rstrip("/") or "/"
+    return raw
 
 
 def classify_payload_resolution(call: FrontendCall) -> str:
@@ -241,6 +271,10 @@ def classify_auth_mode(endpoint: BackendEndpoint, facts: FastAPIGlobalFacts) -> 
 def classify_ownership_mode(endpoint: BackendEndpoint) -> str:
     path = endpoint.canonical_path or canonicalize_path(endpoint.path)
     if "{" not in path:
+        return "not_applicable"
+    # Catch-all router parameters (e.g. /{path:path}) do not represent a
+    # concrete resource identifier and should not trigger ownership checks.
+    if re.search(r"\{[^}:]+:path\}", path):
         return "not_applicable"
 
     if (endpoint.route_intent or "") in {"public_meta", "auth_entry"}:
