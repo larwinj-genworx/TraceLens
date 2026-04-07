@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from typing import Iterable
 
@@ -267,6 +268,9 @@ class MandatoryFlowAnalyzer:
             sink_markers = flow.sink_markers or []
             if not self._has_any_marker(refs, sink_markers):
                 return False
+
+        if flow.id == "ownership_flow" and re.search(r"\{[^}:]+:path\}", endpoint.path):
+            return False
 
         if applies.requires_auth_sensitive:
             auth_markers = ["auth", "get_current", "session", "permission", "scope", "role"]

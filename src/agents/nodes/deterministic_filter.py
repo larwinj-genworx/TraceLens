@@ -75,12 +75,13 @@ def filter_issues(state: AgentState) -> dict[str, Any]:
     cv_keys = _build_contract_violation_keys(
         full_evidence.get("contract_violations", [])
     )
+    client_storage = full_evidence.get("client_storage_issues", [])
 
     kept: list[Issue] = []
     removed_reasons: list[str] = []
 
     for issue in consolidated:
-        reason = _should_drop(issue, ep_index, cv_keys)
+        reason = _should_drop(issue, ep_index, cv_keys, client_storage)
         if reason:
             removed_reasons.append(
                 f"{issue.type} @ {issue.endpoint}: {reason}"
@@ -108,6 +109,7 @@ def _should_drop(
     issue: Issue,
     ep_index: dict[str, dict[str, Any]],
     cv_keys: set[tuple[str, str | None]],
+    client_storage_issues: list[dict[str, Any]],
 ) -> str | None:
     """Return a drop-reason string if the issue should be removed, else None."""
 
@@ -136,6 +138,18 @@ def _should_drop(
             flagged_desc = issue.description.lower()
             if _only_token_fields(evidence_fields, flagged_desc):
                 return "auth_entry endpoint returning expected token fields"
+
+    if issue.type == "insecure_token_storage":
+        if not client_storage_issues:
+            return "no client_storage_issues evidence"
+        if issue.file:
+            issue_file = issue.file.lower()
+            for item in client_storage_issues:
+                source_file = str(item.get("file", "")).lower()
+                if source_file and source_file == issue_file:
+                    break
+            else:
+                return "no client_storage_issues for issue file"
 
     return None
 

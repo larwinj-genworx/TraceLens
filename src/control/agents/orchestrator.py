@@ -149,11 +149,10 @@ class ValidationOrchestrator:
         logger.info("orchestrator deterministic_issues=%d", len(deterministic_issues))
 
         mode = settings.analysis_mode
-        use_agentic = mode == "agentic" or (
-            mode == "hybrid" and request.enable_llm_enhancement and settings.groq_api_key
-        )
+        llm_enabled = bool(request.enable_llm_enhancement and settings.groq_api_key)
+        use_agentic = llm_enabled and mode in {"agentic", "hybrid"}
 
-        if use_agentic and settings.groq_api_key:
+        if use_agentic:
             await self._emit(progress_cb, "agentic_analysis", "Running multi-agent LLM analysis workflow")
             logger.info("orchestrator using agentic analysis mode")
             from src.agents.graph import run_analysis_graph

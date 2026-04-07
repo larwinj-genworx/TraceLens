@@ -42,7 +42,7 @@ _HTTP_VERB_METHODS = frozenset({"get", "post", "put", "patch", "delete", "head",
 
 # Detect `someObject.get(url, ...)` / `someObject.post(url, data, ...)` patterns
 # where someObject is not in _NON_API_OBJECTS.
-_CUSTOM_METHOD_PATTERN = re.compile(r"\b(\w+)\.(get|post|put|patch|delete|head|options)\s*\(")
+_CUSTOM_METHOD_PATTERN = re.compile(r"\b(\w+)\.(get|post|put|patch|delete|head|options)\b")
 
 
 class ReactParser:
@@ -146,10 +146,11 @@ class ReactParser:
 
     def _extract_axios_method_calls(self, service: str, file: str, content: str) -> list[FrontendCall]:
         calls: list[FrontendCall] = []
-        pattern = re.compile(r"axios\.(get|post|put|patch|delete|options|head)\s*\(")
-        for match in pattern.finditer(content):
-            method = match.group(1).upper()
-            args = self._extract_balanced_arguments(content, match.end() - 1)
+        for obj_name, method_name, call_start, open_paren_idx in self._iter_http_method_calls(content):
+            if obj_name != "axios":
+                continue
+            method = method_name.upper()
+            args = self._extract_balanced_arguments(content, open_paren_idx)
             if args is None:
                 continue
             parts = self._split_top_level(args, ",", maxsplit=2)
@@ -165,7 +166,7 @@ class ReactParser:
                 FrontendCall(
                     service=service,
                     file=file,
-                    line=self._line_of_index(content, match.start()),
+                    line=self._line_of_index(content, call_start),
                     raw_url=self._strip_wrapping_quotes(url_expr),
                     method=method,
                     payload_fields=payload_fields,
@@ -226,9 +227,8 @@ class ReactParser:
         """
         calls: list[FrontendCall] = []
 
-        for match in _CUSTOM_METHOD_PATTERN.finditer(content):
-            obj_name = match.group(1)
-            method = match.group(2).upper()
+        for obj_name, method_name, call_start, open_paren_idx in self._iter_http_method_calls(content):
+            method = method_name.upper()
 
             # Skip non-API objects and single-character / purely upper-case names
             # (likely a class constructor call like MyClass.get).
@@ -238,7 +238,7 @@ class ReactParser:
                 continue
 
             # Extract the argument list
-            args = self._extract_balanced_arguments(content, match.end() - 1)
+            args = self._extract_balanced_arguments(content, open_paren_idx)
             if args is None:
                 continue
 
@@ -264,7 +264,7 @@ class ReactParser:
                 FrontendCall(
                     service=service,
                     file=file,
-                    line=self._line_of_index(content, match.start()),
+                    line=self._line_of_index(content, call_start),
                     raw_url=raw_url,
                     method=method,
                     payload_fields=payload_fields,
@@ -276,6 +276,69 @@ class ReactParser:
             )
 
         return calls
+
+    def _iter_http_method_calls(self, content: str) -> list[tuple[str, str, int, int]]:
+        """
+        Yield object method calls for HTTP-like verbs.
+
+        Supports TypeScript generic syntax between method and call parentheses:
+            api.post<T>(...)
+            api.get<Response | null>(...)
+        """
+        out: list[tuple[str, str, int, int]] = []
+        for match in _CUSTOM_METHOD_PATTERN.finditer(content):
+            obj_name = match.group(1)
+            method_name = match.group(2)
+            idx = match.end()
+            idx = self._skip_whitespace(content, idx)
+            idx = self._skip_ts_generic(content, idx)
+            idx = self._skip_whitespace(content, idx)
+            if idx >= len(content) or content[idx] != "(":
+                continue
+            out.append((obj_name, method_name, match.start(), idx))
+        return out
+
+    def _skip_whitespace(self, text: str, idx: int) -> int:
+        while idx < len(text) and text[idx].isspace():
+            idx += 1
+        return idx
+
+    def _skip_ts_generic(self, text: str, idx: int) -> int:
+        if idx >= len(text) or text[idx] != "<":
+            return idx
+
+        depth = 0
+        in_string: str | None = None
+        escape = False
+        i = idx
+        while i < len(text):
+            char = text[i]
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == in_string:
+                    in_string = None
+                i += 1
+                continue
+
+            if char in {'"', "'", "`"}:
+                in_string = char
+                i += 1
+                continue
+
+            if char == "<":
+                depth += 1
+            elif char == ">":
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+            elif char == "(" and depth == 0:
+                # Not a generic parameter list; leave index untouched.
+                return idx
+            i += 1
+        return idx
 
     def _looks_like_api_url(self, url_expr: str) -> bool:
         """

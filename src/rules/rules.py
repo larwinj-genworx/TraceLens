@@ -7,6 +7,17 @@ from src.constants.defaults import is_sensitive_field_name
 from src.schemas.internal import AnalysisContext
 from src.schemas.issues import Issue, Severity
 
+_TOKEN_RESPONSE_FIELDS: frozenset[str] = frozenset({
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "token",
+    "token_type",
+    "expires_in",
+    "access_max_age",
+    "refresh_max_age",
+})
+
 
 def rule_contract_violations(context: AnalysisContext) -> list[Issue]:
     issues: list[Issue] = []
@@ -63,6 +74,11 @@ def rule_data_leakage(context: AnalysisContext) -> list[Issue]:
                 if _is_sensitive_field_name(field.name) and field.name not in redacted
             ]
             if not sensitive_fields:
+                continue
+            # Auth/token issuance endpoints intentionally return token fields.
+            # Avoid reporting these as leakage unless non-token sensitive fields
+            # are also exposed.
+            if endpoint.route_intent == "auth_entry" and _token_only_sensitive_fields(sensitive_fields):
                 continue
 
             is_reachable = (endpoint.service, endpoint.path) in reachable
@@ -478,6 +494,9 @@ def rule_idor_risk(context: AnalysisContext) -> list[Issue]:
             # Must have a path parameter
             if "{" not in ep.path:
                 continue
+            # Ignore catch-all wildcard route params such as /{path:path}.
+            if re.search(r"\{[^}:]+:path\}", ep.path):
+                continue
 
             # Skip monitoring endpoints
             if any(ep.path.startswith(m) for m in _MONITORING_PATHS):
@@ -804,6 +823,13 @@ def rule_websocket_security(context: AnalysisContext) -> list[Issue]:
 
 def _is_sensitive_field_name(name: str) -> bool:
     return is_sensitive_field_name(name)
+
+
+def _token_only_sensitive_fields(fields: list[str]) -> bool:
+    normalized = {field.strip().lower() for field in fields if field and field.strip()}
+    if not normalized:
+        return False
+    return normalized.issubset(_TOKEN_RESPONSE_FIELDS)
 
 
 def _issues_from_missing_flow_coverage(
