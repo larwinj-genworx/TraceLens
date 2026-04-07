@@ -37,6 +37,53 @@ class RepoLoader:
         self.workspace_root = workspace_root or settings.analysis_workspace
         self.workspace_root.mkdir(parents=True, exist_ok=True)
 
+    def load_from_paths(self, dirs: list[Path], names: list[str] | None = None) -> tuple[list[RepoDescriptor], list[str]]:
+        """Load repos from pre-extracted local directories (for ZIP uploads).
+        Skips git clone and runs type/port detection directly."""
+        assumptions: list[str] = []
+        descriptors: list[RepoDescriptor] = []
+
+        for idx, target_dir in enumerate(dirs):
+            repo_name = names[idx] if names and idx < len(names) else target_dir.name
+            if not target_dir.exists():
+                assumptions.append(f"Directory not found for {repo_name}: {target_dir}. Skipping.")
+                descriptors.append(
+                    RepoDescriptor(
+                        name=repo_name,
+                        url=f"zip://{repo_name}",
+                        local_path=str(target_dir),
+                        repo_type=RepoType.UNKNOWN,
+                        clone_error="directory_not_found",
+                    )
+                )
+                continue
+
+            repo_type = self._detect_repo_type(target_dir)
+            ports = self._detect_ports(target_dir, repo_type)
+            fastapi_entrypoint = self._detect_fastapi_entrypoint(target_dir)
+            frontend_start_script = self._detect_frontend_start_script(target_dir)
+
+            if not ports:
+                inferred_default = 8000 if repo_type in {RepoType.BACKEND, RepoType.MIXED} else 3000
+                ports = [inferred_default]
+                assumptions.append(
+                    f"No explicit port found for {repo_name}; defaulted to {inferred_default} based on repo type {repo_type.value}."
+                )
+
+            descriptors.append(
+                RepoDescriptor(
+                    name=repo_name,
+                    url=f"zip://{repo_name}",
+                    local_path=str(target_dir),
+                    repo_type=repo_type,
+                    detected_ports=sorted(set(ports)),
+                    fastapi_entrypoint=fastapi_entrypoint,
+                    frontend_start_script=frontend_start_script,
+                )
+            )
+
+        return descriptors, assumptions
+
     def load(self, repos: list[RepoInput | str]) -> tuple[list[RepoDescriptor], list[str]]:
         assumptions: list[str] = []
         descriptors: list[RepoDescriptor] = []
@@ -45,9 +92,21 @@ class RepoLoader:
             if isinstance(entry, RepoInput):
                 url = entry.url
                 branch = entry.branch
+                source_type = getattr(entry, "source_type", "git")
+                local_path = getattr(entry, "local_path", None)
             else:
                 url = str(entry)
                 branch = None
+                source_type = "git"
+                local_path = None
+
+            if source_type == "zip" and local_path:
+                zip_dirs = [Path(local_path)]
+                zip_names = [Path(local_path).name]
+                zip_descs, zip_assumptions = self.load_from_paths(zip_dirs, zip_names)
+                descriptors.extend(zip_descs)
+                assumptions.extend(zip_assumptions)
+                continue
 
             repo_name = GitHubClient.extract_repo_name(url)
             cache_key = f"{url}#{branch or ''}"

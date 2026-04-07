@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 from src.observability.logging.setup import get_logger
-from src.schemas.internal import FrontendCall, StaticAnalysisResult
+from src.schemas.internal import ClientStorageIssue, FrontendCall, StaticAnalysisResult
 
 logger = get_logger(__name__)
 
@@ -61,6 +61,7 @@ class ReactParser:
         env_references: set[str] = set()
         hardcoded_urls: set[str] = set()
         parser_errors: list[str] = []
+        client_storage_issues: list[ClientStorageIssue] = []
 
         for file_path in self._iter_source_files(repo_path):
             try:
@@ -87,6 +88,9 @@ class ReactParser:
                     if key not in seen:
                         seen.add(key)
                         frontend_calls.append(call)
+                client_storage_issues.extend(
+                    self._detect_insecure_storage(rel_file, content)
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.exception("react_parser_failed file=%s", file_path, extra={"request_id": "-"})
                 parser_errors.append(f"{file_path}: parser failure {exc}")
@@ -102,6 +106,7 @@ class ReactParser:
             env_references=sorted(env_references),
             hardcoded_urls=sorted(filtered_urls),
             parser_errors=parser_errors,
+            client_storage_issues=client_storage_issues,
         )
 
     def _extract_fetch_calls(self, service: str, file: str, content: str) -> list[FrontendCall]:
@@ -590,6 +595,60 @@ class ReactParser:
             return False
         unquoted = stripped.strip("'\"`")
         return bool(_BARE_IDENTIFIER_RE.match(unquoted)) and "/" not in stripped
+
+    _AUTH_STORAGE_KEY_MARKERS: frozenset[str] = frozenset({
+        "token", "access_token", "refresh_token", "id_token", "auth",
+        "jwt", "bearer", "session", "credential", "api_key", "apikey",
+    })
+
+    _STORAGE_PATTERN = re.compile(
+        r"\b(localStorage|sessionStorage)\.(setItem|getItem|removeItem)\s*\(\s*"
+        r"""(['"`])([^'"`]+)\3""",
+    )
+
+    _STORAGE_BRACKET_PATTERN = re.compile(
+        r"\b(localStorage|sessionStorage)\s*\[\s*"
+        r"""(['"`])([^'"`]+)\2"""
+        r"""\s*\]""",
+    )
+
+    def _detect_insecure_storage(
+        self, file: str, content: str,
+    ) -> list[ClientStorageIssue]:
+        """Detect auth tokens stored in localStorage/sessionStorage."""
+        issues: list[ClientStorageIssue] = []
+
+        for match in self._STORAGE_PATTERN.finditer(content):
+            storage_type = match.group(1)
+            operation = match.group(2)
+            key = match.group(4)
+            if self._is_auth_storage_key(key):
+                issues.append(ClientStorageIssue(
+                    storage_type=storage_type,
+                    key=key,
+                    operation=operation,
+                    file=file,
+                    line=self._line_of_index(content, match.start()),
+                ))
+
+        for match in self._STORAGE_BRACKET_PATTERN.finditer(content):
+            storage_type = match.group(1)
+            key = match.group(3)
+            if self._is_auth_storage_key(key):
+                issues.append(ClientStorageIssue(
+                    storage_type=storage_type,
+                    key=key,
+                    operation="bracket_access",
+                    file=file,
+                    line=self._line_of_index(content, match.start()),
+                ))
+
+        return issues
+
+    @classmethod
+    def _is_auth_storage_key(cls, key: str) -> bool:
+        lowered = key.lower().replace("-", "_")
+        return any(marker in lowered for marker in cls._AUTH_STORAGE_KEY_MARKERS)
 
     @staticmethod
     def _is_non_config_url(url: str) -> bool:

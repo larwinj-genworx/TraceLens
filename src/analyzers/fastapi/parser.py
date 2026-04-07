@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 from src.observability.logging.setup import get_logger
-from src.schemas.internal import BackendEndpoint, FastAPIGlobalFacts, SchemaField, StaticAnalysisResult
+from src.schemas.internal import BackendEndpoint, CorsConfig, FastAPIGlobalFacts, SchemaField, StaticAnalysisResult
 
 logger = get_logger(__name__)
 
@@ -74,6 +74,7 @@ class FastAPIParser:
         exception_handler_refs: set[str] = set()
         global_dependencies: set[str] = set()
         module_call_refs: set[str] = set()
+        merged_cors_config: CorsConfig | None = None
 
         # ── Phase 1a: collect ASTs ──────────────────────────────────────────
         file_asts: dict[str, tuple[Path, ast.Module]] = {}
@@ -96,6 +97,7 @@ class FastAPIParser:
 
         # ── Phase 1b: build cross-file context ─────────────────────────────
         global_models = self._build_global_pydantic_models(file_asts)
+        annotated_deps_map = self._build_annotated_type_alias_map(file_asts)
         module_to_file = self._build_module_to_file_map(repo_path)
         cross_file_info = self._build_cross_file_router_info(file_asts, module_to_file)
 
@@ -111,6 +113,7 @@ class FastAPIParser:
                     file_path=file_path,
                     tree=tree,
                     pydantic_models=global_models,
+                    annotated_deps_map=annotated_deps_map,
                     router_prefixes=router_prefixes,
                     router_dependencies=router_deps,
                     app_names=app_names,
@@ -121,6 +124,8 @@ class FastAPIParser:
                 exception_handler_refs.update(module_facts.exception_handler_refs)
                 global_dependencies.update(module_facts.global_dependencies)
                 module_call_refs.update(module_facts.module_call_refs)
+                if module_facts.cors_config and merged_cors_config is None:
+                    merged_cors_config = module_facts.cors_config
             except Exception as exc:  # noqa: BLE001
                 logger.exception("fastapi_module_parse_failed file=%s", file_path, extra={"request_id": "-"})
                 parser_errors.append(f"{file_path}: parser failure {exc}")
@@ -137,6 +142,7 @@ class FastAPIParser:
                 exception_handler_refs=sorted(exception_handler_refs),
                 global_dependencies=sorted(global_dependencies),
                 module_call_refs=sorted(module_call_refs),
+                cors_config=merged_cors_config,
             ),
         )
 
@@ -172,6 +178,45 @@ class FastAPIParser:
                     fields.append(SchemaField(name=field_name, field_type=field_type, required=required))
                 models[node.name] = fields
         return models
+
+    def _build_annotated_type_alias_map(
+        self,
+        file_asts: dict[str, tuple[Path, ast.Module]],
+    ) -> dict[str, list[str]]:
+        """Build a repo-wide map of type aliases that wrap Annotated[T, Depends(func)].
+
+        Handles patterns like:
+            CurrentUserID = Annotated[str, Depends(get_current_user_id)]
+            TicketServiceDep = Annotated[TicketService, Depends(get_ticket_service)]
+        """
+        alias_map: dict[str, list[str]] = {}
+        for _file_str, (_, tree) in file_asts.items():
+            for node in tree.body:
+                if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                    continue
+                target = node.targets[0]
+                if not isinstance(target, ast.Name):
+                    continue
+                deps = self._extract_deps_from_annotated(node.value)
+                if deps:
+                    alias_map[target.id] = deps
+        return alias_map
+
+    def _extract_deps_from_annotated(self, node: ast.expr) -> list[str]:
+        """Extract Depends() function names from an Annotated[T, Depends(func), ...] node."""
+        if not isinstance(node, ast.Subscript):
+            return []
+        base_name = self._resolve_name(node.value)
+        if not base_name.endswith("Annotated"):
+            return []
+        if not isinstance(node.slice, ast.Tuple):
+            return []
+        deps: list[str] = []
+        for item in node.slice.elts[1:]:
+            if isinstance(item, ast.Call) and self._resolve_name(item.func).endswith("Depends"):
+                dep_name = self._resolve_name(item.args[0]) if item.args else "Depends"
+                deps.append(dep_name)
+        return deps
 
     def _build_module_to_file_map(self, repo_path: Path) -> dict[str, str]:
         """
@@ -436,6 +481,7 @@ class FastAPIParser:
         file_path: Path,
         tree: ast.Module,
         pydantic_models: dict[str, list[SchemaField]],
+        annotated_deps_map: dict[str, list[str]],
         router_prefixes: dict[str, str],
         router_dependencies: dict[str, list[str]],
         app_names: set[str],
@@ -457,6 +503,7 @@ class FastAPIParser:
                     file_path=file_path,
                     node=node,
                     pydantic_models=pydantic_models,
+                    annotated_deps_map=annotated_deps_map,
                     router_prefixes=router_prefixes,
                     router_dependencies=router_dependencies,
                     app_names=app_names,
@@ -471,6 +518,7 @@ class FastAPIParser:
                 set(app_dependencies + [dep for deps in router_dependencies.values() for dep in deps])
             ),
             module_call_refs=sorted(self._collect_module_call_refs(tree)),
+            cors_config=self._extract_cors_config(tree),
         )
         return endpoints, module_facts
 
@@ -485,6 +533,7 @@ class FastAPIParser:
         file_path: Path,
         node: ast.FunctionDef | ast.AsyncFunctionDef,
         pydantic_models: dict[str, list[SchemaField]],
+        annotated_deps_map: dict[str, list[str]],
         router_prefixes: dict[str, str],
         router_dependencies: dict[str, list[str]],
         app_names: set[str],
@@ -493,7 +542,7 @@ class FastAPIParser:
         extracted: list[BackendEndpoint] = []
 
         request_schema, request_fields = self._extract_request_schema(node, pydantic_models)
-        arg_dependencies = self._extract_dependencies_from_args(node)
+        arg_dependencies = self._extract_dependencies_from_args(node, annotated_deps_map)
         call_refs = self._extract_call_refs(node)
         string_refs = self._extract_string_refs(node)
         wrapper_decorators = self._extract_non_route_decorators(node.decorator_list)
@@ -633,25 +682,62 @@ class FastAPIParser:
                 return annotation, pydantic_models[base_name]
         return None, []
 
-    def _extract_dependencies_from_args(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
+    def _extract_dependencies_from_args(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+        annotated_deps_map: dict[str, list[str]] | None = None,
+    ) -> list[str]:
         dependencies: list[str] = []
+        annotated_deps_map = annotated_deps_map or {}
+
+        # Style 1: old-style default-value Depends/Security  (user = Depends(get_current_user))
+        _DEP_LIKE = ("Depends", "Security")
         defaults = list(node.args.defaults)
         arg_with_defaults = node.args.args[-len(defaults):] if defaults else []
         for arg, default in zip(arg_with_defaults, defaults, strict=False):
-            if isinstance(default, ast.Call) and self._resolve_name(default.func).endswith("Depends"):
+            if isinstance(default, ast.Call) and any(
+                self._resolve_name(default.func).endswith(d) for d in _DEP_LIKE
+            ):
                 dep_name = self._resolve_name(default.args[0]) if default.args else "Depends"
                 dependencies.append(f"{arg.arg}:{dep_name}")
         kw_defaults = node.args.kw_defaults
         for arg, default in zip(node.args.kwonlyargs, kw_defaults, strict=False):
-            if isinstance(default, ast.Call) and self._resolve_name(default.func).endswith("Depends"):
+            if isinstance(default, ast.Call) and any(
+                self._resolve_name(default.func).endswith(d) for d in _DEP_LIKE
+            ):
                 dep_name = self._resolve_name(default.args[0]) if default.args else "Depends"
                 dependencies.append(f"{arg.arg}:{dep_name}")
+
+        # Style 2: Annotated-based Depends (modern FastAPI)
+        # Handles both direct Annotated[T, Depends(func)] and type aliases
+        already_extracted = {d.split(":")[0] for d in dependencies}
+        for arg in node.args.args + node.args.kwonlyargs:
+            if arg.arg in already_extracted:
+                continue
+            if arg.annotation is None:
+                continue
+
+            # Direct: user: Annotated[User, Depends(get_current_user)]
+            direct_deps = self._extract_deps_from_annotated(arg.annotation)
+            if direct_deps:
+                for dep_name in direct_deps:
+                    dependencies.append(f"{arg.arg}:{dep_name}")
+                continue
+
+            # Type alias: user: CurrentUserID  (where CurrentUserID = Annotated[str, Depends(...)])
+            ann_name = self._resolve_name(arg.annotation)
+            alias_name = ann_name.split(".")[-1] if ann_name else ""
+            if alias_name in annotated_deps_map:
+                for dep_name in annotated_deps_map[alias_name]:
+                    dependencies.append(f"{arg.arg}:{dep_name}")
+
         return dependencies
 
     def _extract_dependencies_from_decorator(self, decorator: ast.Call) -> list[str]:
         return self._extract_dependencies_from_keyword(decorator.keywords, "dependencies")
 
     def _extract_dependencies_from_keyword(self, keywords: list[ast.keyword], key_name: str) -> list[str]:
+        _DEP_LIKE = ("Depends", "Security")
         dependencies: list[str] = []
         for kw in keywords:
             if kw.arg != key_name:
@@ -661,7 +747,7 @@ class FastAPIParser:
             for item in kw.value.elts:
                 if not isinstance(item, ast.Call):
                     continue
-                if not self._resolve_name(item.func).endswith("Depends"):
+                if not any(self._resolve_name(item.func).endswith(d) for d in _DEP_LIKE):
                     continue
                 dep_name = self._resolve_name(item.args[0]) if item.args else "Depends"
                 dependencies.append(dep_name)
@@ -685,6 +771,11 @@ class FastAPIParser:
                 call_name = self._resolve_name(item.func)
                 if call_name:
                     refs.add(call_name)
+                # Collect keyword argument names (e.g. user_id=..., owner_id=...)
+                # so ownership markers match service calls like svc.get(user_id=x).
+                for kw in item.keywords:
+                    if kw.arg:
+                        refs.add(kw.arg)
         return sorted(refs)
 
     def _extract_string_refs(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
@@ -741,6 +832,53 @@ class FastAPIParser:
                 refs.add(self._resolve_name(node.args[0]))
             refs.add("add_middleware")
         return refs
+
+    def _extract_cors_config(self, tree: ast.Module) -> CorsConfig | None:
+        """Extract CORS middleware configuration from add_middleware(CORSMiddleware, ...) calls."""
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr != "add_middleware":
+                continue
+            if not node.args:
+                continue
+            mw_name = self._resolve_name(node.args[0])
+            if not mw_name or "cors" not in mw_name.lower():
+                continue
+
+            config = CorsConfig()
+            for kw in node.keywords:
+                if not kw.arg:
+                    continue
+                if kw.arg == "allow_origins":
+                    config.allow_origins = self._extract_list_of_strings(kw.value)
+                elif kw.arg == "allow_methods":
+                    config.allow_methods = self._extract_list_of_strings(kw.value)
+                elif kw.arg == "allow_headers":
+                    config.allow_headers = self._extract_list_of_strings(kw.value)
+                elif kw.arg == "allow_credentials":
+                    if isinstance(kw.value, ast.Constant):
+                        config.allow_credentials = bool(kw.value.value)
+
+            config.is_permissive = (
+                "*" in config.allow_origins and config.allow_credentials
+            )
+            return config
+        return None
+
+    def _extract_list_of_strings(self, node: ast.expr) -> list[str]:
+        """Extract a list of string constants from an AST node."""
+        if isinstance(node, ast.List):
+            return [
+                elt.value
+                for elt in node.elts
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+            ]
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return [node.value]
+        return []
 
     def _collect_exception_handler_refs(self, tree: ast.Module) -> set[str]:
         refs: set[str] = set()
