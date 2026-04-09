@@ -1,0 +1,110 @@
+{
+  "version": "mandatory_v1",
+  "rules": [
+    {
+      "id": "no_hardcoded_secrets",
+      "title": "No Hardcoded Secrets",
+      "description": "Source code must not contain hardcoded secrets, API keys, tokens, passwords, or credentials.",
+      "severity": "critical",
+      "applies_to": "both"
+    },
+    {
+      "id": "no_wildcard_cors_credentials",
+      "title": "No Wildcard CORS with Credentials",
+      "description": "CORS configuration must not combine allow_origins=['*'] with allow_credentials=True.",
+      "severity": "critical",
+      "applies_to": "fastapi"
+    },
+    {
+      "id": "no_hardcoded_localhost",
+      "title": "No Hardcoded Localhost/Dev URLs",
+      "description": "Non-configuration source files must not contain hardcoded localhost or development environment URLs.",
+      "severity": "high",
+      "applies_to": "both"
+    },
+    {
+      "id": "auth_on_protected_routes",
+      "title": "Authentication on Protected Routes",
+      "description": "All non-public routes must have authentication enforcement (style is user-defined in standard).",
+      "severity": "critical",
+      "applies_to": "fastapi"
+    },
+    {
+      "id": "authz_on_mutating_routes",
+      "title": "Authorization on Mutating Routes",
+      "description": "All mutating non-public routes (POST/PUT/PATCH/DELETE) must have authorization checks (style is user-defined).",
+      "severity": "critical",
+      "applies_to": "fastapi"
+    },
+    {
+      "id": "request_validation_write",
+      "title": "Request Validation on Write Endpoints",
+      "description": "Write endpoints (POST/PUT/PATCH) must validate incoming payloads using the declared validation mechanism.",
+      "severity": "high",
+      "applies_to": "fastapi"
+    },
+    {
+      "id": "response_contracts",
+      "title": "Response Contracts on Data Endpoints",
+      "description": "Endpoints returning data must use an enforceable response contract (style is user-defined).",
+      "severity": "high",
+      "applies_to": "fastapi"
+    },
+    {
+      "id": "error_handling_coverage",
+      "title": "Error Handling Coverage",
+      "description": "All endpoints must have error handling coverage through the declared strategy.",
+      "severity": "high",
+      "applies_to": "fastapi"
+    },
+    {
+      "id": "no_debug_flags",
+      "title": "No Debug/Testing Flags in Production",
+      "description": "Production code must not contain enabled debug flags, testing toggles, or development-mode markers.",
+      "severity": "medium",
+      "applies_to": "both"
+    },
+    {
+      "id": "outbound_request_timeout",
+      "title": "Timeout on Outbound HTTP Requests",
+      "description": "All outbound HTTP requests must specify explicit timeouts.",
+      "severity": "high",
+      "applies_to": "fastapi"
+    },
+    {
+      "id": "no_blocking_in_async",
+      "title": "No Blocking Calls in Async Functions",
+      "description": "Async functions must not call blocking I/O libraries that can freeze the event loop.",
+      "severity": "high",
+      "applies_to": "fastapi"
+    },
+    {
+      "id": "no_bare_except",
+      "title": "No Bare/Swallowed Exceptions",
+      "description": "Exception handlers must not use bare except or silently swallow errors with pass.",
+      "severity": "high",
+      "applies_to": "fastapi"
+    },
+    {
+      "id": "ownership_checks",
+      "title": "Ownership Checks on Resource Endpoints",
+      "description": "Endpoints accessing resources by ID must verify caller ownership or tenant scoping (mechanism is user-defined).",
+      "severity": "critical",
+      "applies_to": "fastapi"
+    },
+    {
+      "id": "input_sanitization_sinks",
+      "title": "Input Sanitization Before Risky Sinks",
+      "description": "User input must be sanitized before being passed to SQL, OS commands, template engines, or other risky sinks.",
+      "severity": "critical",
+      "applies_to": "fastapi"
+    },
+    {
+      "id": "no_sensitive_data_leak",
+      "title": "No Sensitive Data in Responses",
+      "description": "Response schemas must not expose sensitive fields (passwords, tokens, secrets) without explicit redaction.",
+      "severity": "critical",
+      "applies_to": "fastapi"
+    }
+  ]
+}

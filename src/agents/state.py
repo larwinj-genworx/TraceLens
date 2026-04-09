@@ -11,6 +11,7 @@ class AgentState(TypedDict, total=False):
     job_id: str
     analysis_context: AnalysisContext
     evidence_package: dict[str, Any]
+    standards_context: dict[str, Any]
     security_issues: list[Issue]
     integration_issues: list[Issue]
     quality_issues: list[Issue]

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from src.schemas.internal import BackendEndpoint, FastAPIGlobalFacts, FrontendCall, StaticAnalysisResult
+
+if TYPE_CHECKING:
+    from src.standards.marker_registry import MarkerRegistry
 
 _PUBLIC_META_EXACT = {
     "/",
@@ -34,7 +38,6 @@ _PUBLIC_META_SEGMENTS = {
     "ping",
 }
 _AUTH_ENTRY_MARKERS = (
-    "/auth",
     "/login",
     "/signup",
     "/register",
@@ -129,14 +132,34 @@ _TRAILING_CONCAT_RE = re.compile(r"(?:\s*\+\s*[A-Za-z_$][\w.$]*)+$")
 _PLACEHOLDER_SEGMENT_RE = re.compile(r"^\$?\{[^}]+\}$|^[A-Z][A-Z0-9_]*$|^:[A-Za-z_][\w]*$")
 
 
-def normalize_static_results(static_results: dict[str, StaticAnalysisResult]) -> None:
+def normalize_static_results(
+    static_results: dict[str, StaticAnalysisResult],
+    registry: MarkerRegistry | None = None,
+) -> None:
     for static in static_results.values():
         for endpoint in static.backend_endpoints:
-            refs = _combined_refs(endpoint, static.fastapi_facts)
+            endpoint_refs = _combined_refs(endpoint, None)
+            route_refs = endpoint_refs + [
+                ref.strip().lower()
+                for ref in (
+                    static.fastapi_facts.global_dependencies
+                    + static.fastapi_facts.middleware_refs
+                )
+                if ref and ref.strip()
+            ]
             endpoint.canonical_path = canonicalize_path(endpoint.path)
-            endpoint.route_intent = classify_route_intent(endpoint.path, endpoint.method, refs)
-            endpoint.auth_mode = classify_auth_mode(endpoint, static.fastapi_facts)
-            endpoint.ownership_mode = classify_ownership_mode(endpoint)
+            endpoint.route_intent = classify_route_intent(
+                endpoint.path,
+                endpoint.method,
+                route_refs,
+                registry=registry,
+            )
+            endpoint.auth_mode = classify_auth_mode(
+                endpoint, static.fastapi_facts, registry=registry,
+            )
+            endpoint.ownership_mode = classify_ownership_mode(
+                endpoint, registry=registry,
+            )
         for call in static.frontend_calls:
             call.payload_resolution = classify_payload_resolution(call)
             call.canonical_path = canonicalize_url_path(call.resolved_url or call.raw_url)
@@ -169,13 +192,17 @@ def canonicalize_frontend_url_path(url_or_path: str) -> str:
     parts = [part for part in raw.split("/") if part]
     normalized_parts: list[str] = []
     for part in parts:
-        if _PLACEHOLDER_SEGMENT_RE.match(part):
+        cleaned_part = re.sub(r"\$\{[^}]+\}", "", part).strip()
+        if not cleaned_part:
             normalized_parts.append("{param}")
             continue
-        if "${" in part:
+        if _PLACEHOLDER_SEGMENT_RE.match(cleaned_part):
             normalized_parts.append("{param}")
             continue
-        normalized_parts.append(part)
+        if "${" in cleaned_part:
+            normalized_parts.append("{param}")
+            continue
+        normalized_parts.append(cleaned_part)
 
     parts = normalized_parts
     while parts and _PLACEHOLDER_SEGMENT_RE.match(parts[0]):
@@ -215,7 +242,13 @@ def classify_payload_resolution(call: FrontendCall) -> str:
     return "none"
 
 
-def classify_route_intent(path: str, method: str, refs: list[str] | None = None) -> str:
+def classify_route_intent(
+    path: str,
+    method: str,
+    refs: list[str] | None = None,
+    *,
+    registry: MarkerRegistry | None = None,
+) -> str:
     canonical = canonicalize_path(path)
     refs = refs or []
     lower_text = " ".join(refs)
@@ -227,6 +260,10 @@ def classify_route_intent(path: str, method: str, refs: list[str] | None = None)
         return "public_meta"
 
     if any(marker in canonical for marker in _AUTH_ENTRY_MARKERS):
+        return "auth_entry"
+
+    # Registry-based auth-flow detection
+    if registry and registry.is_auth_flow_path(canonical):
         return "auth_entry"
 
     if any(marker in canonical for marker in ("/webhook", "/notify", "/event")):
@@ -246,20 +283,43 @@ def classify_route_intent(path: str, method: str, refs: list[str] | None = None)
     return "business_endpoint"
 
 
-def classify_auth_mode(endpoint: BackendEndpoint, facts: FastAPIGlobalFacts) -> str:
-    refs = _combined_refs(endpoint, facts)
-    route_intent = endpoint.route_intent or classify_route_intent(endpoint.path, endpoint.method, refs)
+def classify_auth_mode(
+    endpoint: BackendEndpoint,
+    facts: FastAPIGlobalFacts,
+    *,
+    registry: MarkerRegistry | None = None,
+) -> str:
+    endpoint_refs = _combined_refs(endpoint, None)
+    global_refs = [
+        ref.strip().lower()
+        for ref in (facts.global_dependencies + facts.middleware_refs)
+        if ref and ref.strip()
+    ]
+    refs = endpoint_refs + global_refs
+    route_intent = endpoint.route_intent or classify_route_intent(
+        endpoint.path, endpoint.method, refs, registry=registry,
+    )
     if route_intent in {"public_meta", "auth_entry"}:
         return "public"
 
-    if _match_markers(refs, _SERVICE_AUTH_MARKERS):
+    # Registry-based public path check
+    if registry and registry.is_public_path(endpoint.path, route_intent):
+        return "public"
+
+    if _match_markers(endpoint_refs, _SERVICE_AUTH_MARKERS):
         return "service_auth"
 
     auth_middleware = detect_auth_middleware(facts.middleware_refs)
     if auth_middleware:
         return "middleware_auth"
 
-    if _match_markers(refs, _USER_AUTH_MARKERS):
+    # Check with both hardcoded and registry markers
+    user_markers = _USER_AUTH_MARKERS
+    if registry:
+        extra = frozenset(m.lower() for m in registry.auth_markers())
+        user_markers = user_markers | extra
+
+    if _match_markers(refs, user_markers):
         return "user_auth"
 
     if _match_markers(refs, _AUTH_AMBIGUOUS_MARKERS):
@@ -268,16 +328,22 @@ def classify_auth_mode(endpoint: BackendEndpoint, facts: FastAPIGlobalFacts) -> 
     return "missing"
 
 
-def classify_ownership_mode(endpoint: BackendEndpoint) -> str:
+def classify_ownership_mode(
+    endpoint: BackendEndpoint,
+    *,
+    registry: MarkerRegistry | None = None,
+) -> str:
     path = endpoint.canonical_path or canonicalize_path(endpoint.path)
     if "{" not in path:
         return "not_applicable"
-    # Catch-all router parameters (e.g. /{path:path}) do not represent a
-    # concrete resource identifier and should not trigger ownership checks.
     if re.search(r"\{[^}:]+:path\}", path):
         return "not_applicable"
 
     if (endpoint.route_intent or "") in {"public_meta", "auth_entry"}:
+        return "not_applicable"
+
+    # Registry-based public path check
+    if registry and registry.is_public_path(path, endpoint.route_intent):
         return "not_applicable"
 
     refs = _combined_refs(endpoint, None)
@@ -286,7 +352,13 @@ def classify_ownership_mode(endpoint: BackendEndpoint) -> str:
     has_identity = any(marker in joined for marker in ("current_user", "user_id", "tenant_id", "org_id", "owner_id"))
     has_resource_param = any(param in joined for param in path_params)
 
-    if _match_markers(refs, _OWNERSHIP_MARKERS):
+    # Merge ownership markers from registry
+    ownership_markers = _OWNERSHIP_MARKERS
+    if registry:
+        extra = frozenset(m.lower() for m in registry.ownership_markers())
+        ownership_markers = ownership_markers | extra
+
+    if _match_markers(refs, ownership_markers):
         return "covered"
     if any(pattern.search(joined) for pattern in _OWNERSHIP_COVERED_PATTERNS):
         return "covered"

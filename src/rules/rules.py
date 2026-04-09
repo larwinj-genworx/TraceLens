@@ -518,6 +518,11 @@ def rule_idor_risk(context: AnalysisContext) -> list[Issue]:
             if has_ownership:
                 continue
 
+            # Check AST-derived service call signals for ownership
+            signals = ep.service_call_signals
+            if signals.has_identity_comparison or signals.has_identity_filter:
+                continue
+
             is_shared = _is_shared_resource_path(ep.path, _SHARED_RESOURCE_MARKERS)
 
             if is_shared:
@@ -872,7 +877,43 @@ def _issues_from_missing_flow_coverage(
             )
         )
 
-    return issues
+    return _deduplicate_service_wide_issues(issues)
+
+
+def _deduplicate_service_wide_issues(issues: list[Issue]) -> list[Issue]:
+    """When >=5 endpoints in a service share the same violation type,
+    collapse into a single service-level issue."""
+    by_service_type: dict[tuple[str, str], list[Issue]] = defaultdict(list)
+    for issue in issues:
+        by_service_type[(issue.service, issue.type)].append(issue)
+
+    result: list[Issue] = []
+    for (_service, _issue_type), group in by_service_type.items():
+        if len(group) >= 5:
+            representative = group[0]
+            sample_endpoints = [i.endpoint for i in group[:5] if i.endpoint]
+            result.append(
+                Issue(
+                    type=representative.type,
+                    severity=representative.severity,
+                    service=representative.service,
+                    endpoint=None,
+                    file=representative.file,
+                    line=representative.line,
+                    description=f"{representative.description} (affects {len(group)} endpoints)",
+                    evidence={
+                        **representative.evidence,
+                        "affected_count": len(group),
+                        "sample_endpoints": sample_endpoints,
+                    },
+                    impact=representative.impact,
+                    fix=representative.fix,
+                    confidence=representative.confidence,
+                )
+            )
+        else:
+            result.extend(group)
+    return result
 
 
 def _to_severity(raw: str) -> Severity:

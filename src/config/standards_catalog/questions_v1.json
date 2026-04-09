@@ -1,0 +1,1259 @@
+{
+  "version": "questions_v1",
+  "stacks": {
+    "fastapi": {
+      "categories": [
+        {
+          "id": "auth_style",
+          "label": "Authentication Style",
+          "description": "How does your backend enforce authentication on protected routes?",
+          "required": true,
+          "options": [
+            {
+              "value": "dependency_injection",
+              "label": "FastAPI Dependency Injection (Depends)",
+              "evidence_markers": ["Depends(", "get_current_user", "get_current_", "oauth2_scheme", "Security("],
+              "check_strategy": "dep_injection_auth"
+            },
+            {
+              "value": "global_middleware",
+              "label": "Global Authentication Middleware",
+              "evidence_markers": ["add_middleware", "AuthMiddleware", "AuthenticationMiddleware", "JWTMiddleware", "TokenMiddleware"],
+              "check_strategy": "middleware_auth"
+            },
+            {
+              "value": "decorator",
+              "label": "Decorator-based (@require_auth, @login_required)",
+              "evidence_markers": ["@require_auth", "@login_required", "@auth_required", "@authenticate", "@jwt_required", "@token_required"],
+              "check_strategy": "decorator_auth"
+            },
+            {
+              "value": "separate_auth_service",
+              "label": "Separate Authentication Service / Gateway",
+              "evidence_markers": ["auth_service", "verify_token", "validate_token", "authenticate_request", "auth_client"],
+              "check_strategy": "service_auth"
+            },
+            {
+              "value": "session_based",
+              "label": "Session-based Authentication",
+              "evidence_markers": ["session", "SessionMiddleware", "session_id", "get_session", "session_backend"],
+              "check_strategy": "session_auth"
+            },
+            {
+              "value": "none",
+              "label": "No Authentication (public API)",
+              "evidence_markers": [],
+              "check_strategy": "no_auth"
+            }
+          ]
+        },
+        {
+          "id": "auth_mechanism",
+          "label": "Authentication Mechanism",
+          "description": "What authentication mechanism does your backend use?",
+          "required": true,
+          "options": [
+            {
+              "value": "jwt_bearer",
+              "label": "JWT Bearer Token",
+              "evidence_markers": ["jwt", "JWT", "Bearer", "jose", "python-jose", "PyJWT", "jwt.decode", "jwt.encode"],
+              "check_strategy": "jwt_mechanism"
+            },
+            {
+              "value": "oauth2",
+              "label": "OAuth2",
+              "evidence_markers": ["OAuth2PasswordBearer", "OAuth2PasswordRequestForm", "oauth2_scheme", "OAuth2AuthorizationCodeBearer"],
+              "check_strategy": "oauth2_mechanism"
+            },
+            {
+              "value": "api_key",
+              "label": "API Key",
+              "evidence_markers": ["api_key", "x-api-key", "APIKeyHeader", "APIKeyCookie", "APIKeyQuery"],
+              "check_strategy": "api_key_mechanism"
+            },
+            {
+              "value": "session_cookie",
+              "label": "Session Cookie",
+              "evidence_markers": ["session", "cookie", "set_cookie", "SessionMiddleware", "session_id"],
+              "check_strategy": "session_cookie_mechanism"
+            },
+            {
+              "value": "basic_auth",
+              "label": "HTTP Basic Auth",
+              "evidence_markers": ["HTTPBasic", "HTTPBasicCredentials", "basic_auth"],
+              "check_strategy": "basic_auth_mechanism"
+            },
+            {
+              "value": "custom_token",
+              "label": "Custom Token Scheme",
+              "evidence_markers": ["token", "x-token", "x-auth-token", "custom_auth", "verify_token"],
+              "check_strategy": "custom_token_mechanism"
+            }
+          ]
+        },
+        {
+          "id": "authz_model",
+          "label": "Authorization Model",
+          "description": "How does your backend enforce authorization (role/permission checks)?",
+          "required": true,
+          "options": [
+            {
+              "value": "rbac",
+              "label": "Role-Based Access Control (RBAC)",
+              "evidence_markers": ["role", "require_role", "has_role", "check_role", "Role", "RoleEnum", "user.role"],
+              "check_strategy": "rbac_authz"
+            },
+            {
+              "value": "abac",
+              "label": "Attribute-Based Access Control (ABAC)",
+              "evidence_markers": ["policy", "attribute", "evaluate_policy", "check_attributes", "abac"],
+              "check_strategy": "abac_authz"
+            },
+            {
+              "value": "permission_based",
+              "label": "Permission-Based",
+              "evidence_markers": ["permission", "has_permission", "check_permission", "require_permission", "Permission"],
+              "check_strategy": "permission_authz"
+            },
+            {
+              "value": "role_decorator",
+              "label": "Role Decorators (@admin_only, @staff_required)",
+              "evidence_markers": ["@admin_only", "@staff_required", "@role_required", "@require_admin", "@superuser_only"],
+              "check_strategy": "decorator_authz"
+            },
+            {
+              "value": "policy_engine",
+              "label": "External Policy Engine (OPA, Casbin)",
+              "evidence_markers": ["casbin", "opa", "policy_engine", "enforce", "enforcer", "check_policy"],
+              "check_strategy": "policy_engine_authz"
+            },
+            {
+              "value": "none",
+              "label": "No Authorization (all authenticated users equal)",
+              "evidence_markers": [],
+              "check_strategy": "no_authz"
+            }
+          ]
+        },
+        {
+          "id": "authz_enforcement",
+          "label": "Authorization Enforcement",
+          "description": "Where is authorization enforced in your code?",
+          "required": true,
+          "options": [
+            {
+              "value": "dependency_injection",
+              "label": "FastAPI Dependency Injection",
+              "evidence_markers": ["Depends(", "require_role", "check_permission", "RoleChecker"],
+              "check_strategy": "dep_injection_authz_enforcement"
+            },
+            {
+              "value": "middleware",
+              "label": "Middleware Layer",
+              "evidence_markers": ["add_middleware", "AuthorizationMiddleware", "PermissionMiddleware"],
+              "check_strategy": "middleware_authz_enforcement"
+            },
+            {
+              "value": "decorator",
+              "label": "Route Decorators",
+              "evidence_markers": ["@require_role", "@admin_only", "@permission_required", "@authorize"],
+              "check_strategy": "decorator_authz_enforcement"
+            },
+            {
+              "value": "service_layer_check",
+              "label": "Service Layer Logic",
+              "evidence_markers": ["authorize", "check_access", "verify_permission", "can_access"],
+              "check_strategy": "service_layer_authz_enforcement"
+            }
+          ]
+        },
+        {
+          "id": "ownership_protection",
+          "label": "Ownership / IDOR Protection",
+          "description": "How does your backend verify resource ownership to prevent IDOR?",
+          "required": true,
+          "options": [
+            {
+              "value": "tenant_scoping",
+              "label": "Tenant/Org Scoping (all queries filtered by tenant_id)",
+              "evidence_markers": ["tenant_id", "org_id", "organization_id", "filter_by_tenant", "scoped_to"],
+              "check_strategy": "tenant_ownership"
+            },
+            {
+              "value": "user_id_filtering",
+              "label": "User ID Filtering (queries filtered by user_id)",
+              "evidence_markers": ["user_id", "owner_id", "created_by", "belongs_to", "get_by_user", "filter_by_owner"],
+              "check_strategy": "user_id_ownership"
+            },
+            {
+              "value": "ownership_service",
+              "label": "Dedicated Ownership Service",
+              "evidence_markers": ["verify_ownership", "check_ownership", "is_owner", "ownership_service", "access_control"],
+              "check_strategy": "ownership_service"
+            },
+            {
+              "value": "policy_check",
+              "label": "Policy-Based Access Check",
+              "evidence_markers": ["check_access", "can_access", "has_access", "policy_check", "enforce"],
+              "check_strategy": "policy_ownership"
+            },
+            {
+              "value": "none",
+              "label": "No Ownership Checks (shared resources)",
+              "evidence_markers": [],
+              "check_strategy": "no_ownership"
+            }
+          ]
+        },
+        {
+          "id": "request_validation",
+          "label": "Request Validation",
+          "description": "How does your backend validate incoming request payloads?",
+          "required": true,
+          "options": [
+            {
+              "value": "pydantic_models",
+              "label": "Pydantic Models (BaseModel)",
+              "evidence_markers": ["BaseModel", "Field(", "field_validator", "model_validate", "model_validator"],
+              "check_strategy": "pydantic_validation"
+            },
+            {
+              "value": "manual_validation",
+              "label": "Manual Validation in Handlers",
+              "evidence_markers": ["validate", "if not", "raise ValueError", "raise HTTPException", "isinstance"],
+              "check_strategy": "manual_validation"
+            },
+            {
+              "value": "marshmallow",
+              "label": "Marshmallow Schemas",
+              "evidence_markers": ["marshmallow", "Schema", "fields.", "load(", "dump("],
+              "check_strategy": "marshmallow_validation"
+            },
+            {
+              "value": "jsonschema",
+              "label": "JSON Schema Validation",
+              "evidence_markers": ["jsonschema", "validate(", "schema", "Draft7Validator"],
+              "check_strategy": "jsonschema_validation"
+            },
+            {
+              "value": "cerberus",
+              "label": "Cerberus Validation",
+              "evidence_markers": ["cerberus", "Validator", "schema"],
+              "check_strategy": "cerberus_validation"
+            }
+          ]
+        },
+        {
+          "id": "response_contract",
+          "label": "Response Contract",
+          "description": "How does your backend enforce response schemas?",
+          "required": true,
+          "options": [
+            {
+              "value": "response_model",
+              "label": "FastAPI response_model Parameter",
+              "evidence_markers": ["response_model=", "response_model_exclude", "model_dump"],
+              "check_strategy": "response_model_contract"
+            },
+            {
+              "value": "dto_pattern",
+              "label": "DTO/Schema Pattern",
+              "evidence_markers": ["DTO", "Schema", "Response", "Serializer", "to_dict", "to_response"],
+              "check_strategy": "dto_contract"
+            },
+            {
+              "value": "serializer",
+              "label": "Custom Serializer",
+              "evidence_markers": ["serialize", "jsonable_encoder", "json_response", "JSONResponse"],
+              "check_strategy": "serializer_contract"
+            },
+            {
+              "value": "manual_dict",
+              "label": "Manual Dict Returns",
+              "evidence_markers": ["return {", "dict(", "jsonify"],
+              "check_strategy": "manual_dict_contract"
+            }
+          ]
+        },
+        {
+          "id": "error_handling",
+          "label": "Error Handling Strategy",
+          "description": "How does your backend handle errors and exceptions?",
+          "required": true,
+          "options": [
+            {
+              "value": "global_exception_handler",
+              "label": "Global Exception Handler",
+              "evidence_markers": ["@app.exception_handler", "exception_handler", "add_exception_handler", "ExceptionMiddleware"],
+              "check_strategy": "global_error_handling"
+            },
+            {
+              "value": "per_route_try_except",
+              "label": "Per-Route Try/Except Blocks",
+              "evidence_markers": ["try:", "except", "HTTPException", "raise"],
+              "check_strategy": "per_route_error_handling"
+            },
+            {
+              "value": "centralized_middleware",
+              "label": "Centralized Error Middleware",
+              "evidence_markers": ["ErrorMiddleware", "error_handler", "ErrorHandlerMiddleware"],
+              "check_strategy": "middleware_error_handling"
+            },
+            {
+              "value": "custom_exception_classes",
+              "label": "Custom Exception Class Hierarchy",
+              "evidence_markers": ["class.*Exception", "class.*Error", "DomainError", "AppException", "BaseError"],
+              "check_strategy": "custom_exception_error_handling"
+            },
+            {
+              "value": "hybrid",
+              "label": "Hybrid (Global + Per-Route)",
+              "evidence_markers": ["exception_handler", "try:", "except", "HTTPException"],
+              "check_strategy": "hybrid_error_handling"
+            }
+          ]
+        },
+        {
+          "id": "database_orm",
+          "label": "Database / ORM",
+          "description": "What database/ORM does your backend use?",
+          "required": true,
+          "options": [
+            {
+              "value": "sqlalchemy_sync",
+              "label": "SQLAlchemy (Synchronous)",
+              "evidence_markers": ["sqlalchemy", "Session", "create_engine", "sessionmaker", "declarative_base", "Base"],
+              "check_strategy": "sqlalchemy_sync_db"
+            },
+            {
+              "value": "sqlalchemy_async",
+              "label": "SQLAlchemy (Async)",
+              "evidence_markers": ["sqlalchemy", "AsyncSession", "create_async_engine", "async_sessionmaker"],
+              "check_strategy": "sqlalchemy_async_db"
+            },
+            {
+              "value": "tortoise_orm",
+              "label": "Tortoise ORM",
+              "evidence_markers": ["tortoise", "Model", "fields.", "Tortoise.init"],
+              "check_strategy": "tortoise_db"
+            },
+            {
+              "value": "prisma",
+              "label": "Prisma (Python)",
+              "evidence_markers": ["prisma", "Prisma", "prisma."],
+              "check_strategy": "prisma_db"
+            },
+            {
+              "value": "raw_sql",
+              "label": "Raw SQL / Database Driver",
+              "evidence_markers": ["execute", "cursor", "fetchone", "fetchall", "psycopg", "asyncpg", "aiomysql"],
+              "check_strategy": "raw_sql_db"
+            },
+            {
+              "value": "mongodb_motor",
+              "label": "MongoDB (Motor Async)",
+              "evidence_markers": ["motor", "AsyncIOMotorClient", "collection", "find(", "insert_one"],
+              "check_strategy": "mongodb_motor_db"
+            },
+            {
+              "value": "mongodb_pymongo",
+              "label": "MongoDB (PyMongo)",
+              "evidence_markers": ["pymongo", "MongoClient", "collection", "find(", "insert_one"],
+              "check_strategy": "mongodb_pymongo_db"
+            }
+          ]
+        },
+        {
+          "id": "persistence_pattern",
+          "label": "Persistence Pattern",
+          "description": "What architectural pattern does your data access layer follow?",
+          "required": true,
+          "options": [
+            {
+              "value": "repository_pattern",
+              "label": "Repository Pattern",
+              "evidence_markers": ["Repository", "repository", "repo", "get_by_id", "find_all", "save", "delete"],
+              "check_strategy": "repository_persistence"
+            },
+            {
+              "value": "active_record",
+              "label": "Active Record",
+              "evidence_markers": [".save()", ".delete()", ".create()", "Model.get", "Model.filter"],
+              "check_strategy": "active_record_persistence"
+            },
+            {
+              "value": "data_mapper",
+              "label": "Data Mapper",
+              "evidence_markers": ["mapper", "registry", "map_imperatively", "mapper_registry"],
+              "check_strategy": "data_mapper_persistence"
+            },
+            {
+              "value": "direct_query",
+              "label": "Direct Queries in Services",
+              "evidence_markers": ["session.query", "session.execute", "db.query", "select("],
+              "check_strategy": "direct_query_persistence"
+            },
+            {
+              "value": "service_owns_session",
+              "label": "Service Owns Session",
+              "evidence_markers": ["session", "db_session", "get_db", "Depends(get_db)"],
+              "check_strategy": "service_session_persistence"
+            }
+          ]
+        },
+        {
+          "id": "logging_style",
+          "label": "Logging / Audit Style",
+          "description": "How does your backend handle logging and audit trails?",
+          "required": false,
+          "options": [
+            {
+              "value": "structured_logging",
+              "label": "Structured Logging (JSON format)",
+              "evidence_markers": ["structlog", "json_log", "structured", "logger.info(", "extra={"],
+              "check_strategy": "structured_logging"
+            },
+            {
+              "value": "middleware_logging",
+              "label": "Middleware-Based Request Logging",
+              "evidence_markers": ["LoggingMiddleware", "RequestLogMiddleware", "access_log"],
+              "check_strategy": "middleware_logging"
+            },
+            {
+              "value": "decorator_logging",
+              "label": "Decorator-Based Logging",
+              "evidence_markers": ["@log", "@audit", "@trace", "log_request"],
+              "check_strategy": "decorator_logging"
+            },
+            {
+              "value": "event_sourcing",
+              "label": "Event Sourcing / Audit Events",
+              "evidence_markers": ["event", "audit_log", "emit_event", "EventStore", "audit_trail"],
+              "check_strategy": "event_sourcing_logging"
+            },
+            {
+              "value": "stdlib_logging",
+              "label": "Standard Library Logging",
+              "evidence_markers": ["import logging", "logging.getLogger", "logger = logging"],
+              "check_strategy": "stdlib_logging"
+            }
+          ]
+        },
+        {
+          "id": "logging_library",
+          "label": "Logging Library",
+          "description": "Which logging library does your backend use?",
+          "required": false,
+          "options": [
+            {
+              "value": "loguru",
+              "label": "Loguru",
+              "evidence_markers": ["loguru", "from loguru import logger"],
+              "check_strategy": "loguru_lib"
+            },
+            {
+              "value": "stdlib_logging",
+              "label": "Python stdlib logging",
+              "evidence_markers": ["import logging", "logging.getLogger"],
+              "check_strategy": "stdlib_logging_lib"
+            },
+            {
+              "value": "structlog",
+              "label": "structlog",
+              "evidence_markers": ["structlog", "structlog.get_logger"],
+              "check_strategy": "structlog_lib"
+            },
+            {
+              "value": "custom",
+              "label": "Custom Logger",
+              "evidence_markers": ["logger", "log"],
+              "check_strategy": "custom_logging_lib"
+            }
+          ]
+        },
+        {
+          "id": "rate_limiting",
+          "label": "Rate Limiting",
+          "description": "How does your backend handle rate limiting?",
+          "required": false,
+          "options": [
+            {
+              "value": "slowapi",
+              "label": "SlowAPI",
+              "evidence_markers": ["slowapi", "Limiter", "limiter", "@limiter.limit"],
+              "check_strategy": "slowapi_rate_limit"
+            },
+            {
+              "value": "fastapi_limiter",
+              "label": "FastAPI Limiter",
+              "evidence_markers": ["fastapi_limiter", "RateLimiter", "FastAPILimiter"],
+              "check_strategy": "fastapi_limiter_rate_limit"
+            },
+            {
+              "value": "custom_middleware",
+              "label": "Custom Rate Limiting Middleware",
+              "evidence_markers": ["RateLimitMiddleware", "rate_limit", "throttle"],
+              "check_strategy": "custom_rate_limit"
+            },
+            {
+              "value": "api_gateway",
+              "label": "API Gateway Managed",
+              "evidence_markers": [],
+              "check_strategy": "gateway_rate_limit"
+            },
+            {
+              "value": "none",
+              "label": "No Rate Limiting",
+              "evidence_markers": [],
+              "check_strategy": "no_rate_limit"
+            }
+          ]
+        },
+        {
+          "id": "cors_config",
+          "label": "CORS Configuration",
+          "description": "How is CORS configured in your backend?",
+          "required": true,
+          "options": [
+            {
+              "value": "fastapi_cors_middleware",
+              "label": "FastAPI CORSMiddleware",
+              "evidence_markers": ["CORSMiddleware", "add_middleware", "allow_origins"],
+              "check_strategy": "fastapi_cors"
+            },
+            {
+              "value": "custom_middleware",
+              "label": "Custom CORS Middleware",
+              "evidence_markers": ["CorsMiddleware", "cors_handler", "access-control"],
+              "check_strategy": "custom_cors"
+            },
+            {
+              "value": "api_gateway_managed",
+              "label": "API Gateway Managed CORS",
+              "evidence_markers": [],
+              "check_strategy": "gateway_cors"
+            }
+          ]
+        },
+        {
+          "id": "cors_policy",
+          "label": "CORS Policy Level",
+          "description": "How strict is your CORS policy?",
+          "required": true,
+          "options": [
+            {
+              "value": "strict_origins",
+              "label": "Strict (specific origins only)",
+              "evidence_markers": ["allow_origins", "https://"],
+              "check_strategy": "strict_cors_policy"
+            },
+            {
+              "value": "moderate",
+              "label": "Moderate (known domains + dev)",
+              "evidence_markers": ["allow_origins"],
+              "check_strategy": "moderate_cors_policy"
+            },
+            {
+              "value": "permissive_development",
+              "label": "Permissive / Development",
+              "evidence_markers": ["*", "allow_origins"],
+              "check_strategy": "permissive_cors_policy"
+            }
+          ]
+        },
+        {
+          "id": "api_architecture",
+          "label": "API Architecture",
+          "description": "What API architecture style does your backend follow?",
+          "required": true,
+          "options": [
+            {
+              "value": "rest",
+              "label": "REST",
+              "evidence_markers": ["APIRouter", "@router.get", "@router.post", "@app.get"],
+              "check_strategy": "rest_api"
+            },
+            {
+              "value": "graphql",
+              "label": "GraphQL",
+              "evidence_markers": ["graphene", "strawberry", "ariadne", "Query", "Mutation", "graphql"],
+              "check_strategy": "graphql_api"
+            },
+            {
+              "value": "grpc",
+              "label": "gRPC",
+              "evidence_markers": ["grpc", "protobuf", ".proto", "grpcio", "servicer"],
+              "check_strategy": "grpc_api"
+            },
+            {
+              "value": "hybrid",
+              "label": "Hybrid (REST + GraphQL/gRPC)",
+              "evidence_markers": ["APIRouter", "graphene", "strawberry"],
+              "check_strategy": "hybrid_api"
+            }
+          ]
+        },
+        {
+          "id": "api_versioning",
+          "label": "API Versioning",
+          "description": "How does your API handle versioning?",
+          "required": false,
+          "options": [
+            {
+              "value": "url_prefix",
+              "label": "URL Prefix (/api/v1, /api/v2)",
+              "evidence_markers": ["/api/v1", "/api/v2", "prefix=\"/api/v"],
+              "check_strategy": "url_prefix_versioning"
+            },
+            {
+              "value": "header_based",
+              "label": "Header-Based Versioning",
+              "evidence_markers": ["Accept-Version", "X-API-Version", "api-version"],
+              "check_strategy": "header_versioning"
+            },
+            {
+              "value": "query_param",
+              "label": "Query Parameter",
+              "evidence_markers": ["version=", "api_version", "?v="],
+              "check_strategy": "query_param_versioning"
+            },
+            {
+              "value": "none",
+              "label": "No Versioning",
+              "evidence_markers": [],
+              "check_strategy": "no_versioning"
+            }
+          ]
+        },
+        {
+          "id": "config_management",
+          "label": "Configuration Management",
+          "description": "How does your backend manage configuration?",
+          "required": true,
+          "options": [
+            {
+              "value": "pydantic_settings",
+              "label": "Pydantic Settings (BaseSettings)",
+              "evidence_markers": ["BaseSettings", "pydantic_settings", "SettingsConfigDict", "env_file"],
+              "check_strategy": "pydantic_config"
+            },
+            {
+              "value": "dotenv_direct",
+              "label": "Direct dotenv Loading",
+              "evidence_markers": ["dotenv", "load_dotenv", "os.getenv", "os.environ"],
+              "check_strategy": "dotenv_config"
+            },
+            {
+              "value": "yaml_config",
+              "label": "YAML Configuration Files",
+              "evidence_markers": ["yaml", "PyYAML", "config.yaml", "config.yml"],
+              "check_strategy": "yaml_config"
+            },
+            {
+              "value": "environment_only",
+              "label": "Environment Variables Only",
+              "evidence_markers": ["os.getenv", "os.environ", "environ.get"],
+              "check_strategy": "env_only_config"
+            }
+          ]
+        },
+        {
+          "id": "migration_tool",
+          "label": "Database Migration Tool",
+          "description": "What tool manages your database migrations?",
+          "required": false,
+          "options": [
+            {
+              "value": "alembic",
+              "label": "Alembic",
+              "evidence_markers": ["alembic", "alembic.ini", "migrations/", "revision"],
+              "check_strategy": "alembic_migration"
+            },
+            {
+              "value": "raw_sql",
+              "label": "Raw SQL Migrations",
+              "evidence_markers": ["migration", ".sql", "CREATE TABLE", "ALTER TABLE"],
+              "check_strategy": "raw_sql_migration"
+            },
+            {
+              "value": "none",
+              "label": "No Migrations",
+              "evidence_markers": [],
+              "check_strategy": "no_migration"
+            }
+          ]
+        },
+        {
+          "id": "di_style",
+          "label": "Dependency Injection Style",
+          "description": "How does your backend handle dependency injection?",
+          "required": true,
+          "options": [
+            {
+              "value": "fastapi_depends",
+              "label": "FastAPI Built-in Depends()",
+              "evidence_markers": ["Depends(", "Depends", "def get_", "async def get_"],
+              "check_strategy": "fastapi_di"
+            },
+            {
+              "value": "dependency_injector",
+              "label": "dependency-injector Library",
+              "evidence_markers": ["dependency_injector", "Container", "Provider", "Inject"],
+              "check_strategy": "di_container"
+            },
+            {
+              "value": "manual_constructor",
+              "label": "Manual Constructor Injection",
+              "evidence_markers": ["__init__", "self.", "inject"],
+              "check_strategy": "manual_di"
+            }
+          ]
+        },
+        {
+          "id": "architecture_pattern",
+          "label": "Architecture Pattern",
+          "description": "What architectural pattern does your backend follow?",
+          "required": true,
+          "options": [
+            {
+              "value": "layered_routes_services_repos",
+              "label": "Layered (Routes -> Services -> Repositories -> Models)",
+              "evidence_markers": ["routes", "services", "repositories", "models", "schemas"],
+              "check_strategy": "layered_architecture"
+            },
+            {
+              "value": "clean_architecture",
+              "label": "Clean Architecture",
+              "evidence_markers": ["domain", "use_cases", "interfaces", "infrastructure", "entities"],
+              "check_strategy": "clean_architecture"
+            },
+            {
+              "value": "hexagonal",
+              "label": "Hexagonal / Ports & Adapters",
+              "evidence_markers": ["ports", "adapters", "domain", "application"],
+              "check_strategy": "hexagonal_architecture"
+            },
+            {
+              "value": "simple_crud",
+              "label": "Simple CRUD (Routes + DB)",
+              "evidence_markers": ["@router", "session", "db"],
+              "check_strategy": "simple_crud_architecture"
+            },
+            {
+              "value": "modular_monolith",
+              "label": "Modular Monolith",
+              "evidence_markers": ["modules", "module", "bounded_context"],
+              "check_strategy": "modular_architecture"
+            }
+          ]
+        },
+        {
+          "id": "input_sanitization",
+          "label": "Input Sanitization",
+          "description": "How does your backend sanitize user inputs before risky operations?",
+          "required": true,
+          "options": [
+            {
+              "value": "pydantic_validators",
+              "label": "Pydantic Field Validators",
+              "evidence_markers": ["field_validator", "validator", "model_validator", "BeforeValidator"],
+              "check_strategy": "pydantic_sanitization"
+            },
+            {
+              "value": "bleach",
+              "label": "Bleach Library",
+              "evidence_markers": ["bleach", "bleach.clean", "sanitize"],
+              "check_strategy": "bleach_sanitization"
+            },
+            {
+              "value": "custom_sanitizer",
+              "label": "Custom Sanitizer Functions",
+              "evidence_markers": ["sanitize", "escape", "clean", "strip_tags"],
+              "check_strategy": "custom_sanitization"
+            },
+            {
+              "value": "orm_parameterized",
+              "label": "ORM Parameterized Queries Only",
+              "evidence_markers": ["select(", "filter(", "filter_by(", "where("],
+              "check_strategy": "orm_sanitization"
+            },
+            {
+              "value": "none",
+              "label": "No Explicit Sanitization",
+              "evidence_markers": [],
+              "check_strategy": "no_sanitization"
+            }
+          ]
+        },
+        {
+          "id": "secret_management",
+          "label": "Secret Management",
+          "description": "How does your backend manage secrets and credentials?",
+          "required": true,
+          "options": [
+            {
+              "value": "env_vars",
+              "label": "Environment Variables",
+              "evidence_markers": ["os.getenv", "os.environ", "environ.get"],
+              "check_strategy": "env_secrets"
+            },
+            {
+              "value": "vault",
+              "label": "HashiCorp Vault",
+              "evidence_markers": ["hvac", "vault", "Vault"],
+              "check_strategy": "vault_secrets"
+            },
+            {
+              "value": "aws_secrets_manager",
+              "label": "AWS Secrets Manager",
+              "evidence_markers": ["boto3", "secretsmanager", "get_secret_value"],
+              "check_strategy": "aws_secrets"
+            },
+            {
+              "value": "dotenv",
+              "label": ".env Files (dotenv)",
+              "evidence_markers": ["dotenv", "load_dotenv", ".env"],
+              "check_strategy": "dotenv_secrets"
+            },
+            {
+              "value": "config_file",
+              "label": "Configuration File",
+              "evidence_markers": ["config.", "settings.", "yaml", "toml"],
+              "check_strategy": "config_file_secrets"
+            }
+          ]
+        },
+        {
+          "id": "idempotency",
+          "label": "Idempotency",
+          "description": "How does your backend handle idempotency for critical operations?",
+          "required": false,
+          "options": [
+            {
+              "value": "idempotency_key_header",
+              "label": "Idempotency Key Header",
+              "evidence_markers": ["idempotency_key", "Idempotency-Key", "x-idempotency-key"],
+              "check_strategy": "idempotency_key"
+            },
+            {
+              "value": "database_unique_constraint",
+              "label": "Database Unique Constraints",
+              "evidence_markers": ["UniqueConstraint", "unique=True", "unique_together", "ON CONFLICT"],
+              "check_strategy": "db_unique_idempotency"
+            },
+            {
+              "value": "distributed_lock",
+              "label": "Distributed Lock (Redis, etc.)",
+              "evidence_markers": ["redis", "lock", "acquire_lock", "distributed_lock", "aioredis"],
+              "check_strategy": "distributed_lock_idempotency"
+            },
+            {
+              "value": "none",
+              "label": "No Idempotency Handling",
+              "evidence_markers": [],
+              "check_strategy": "no_idempotency"
+            }
+          ]
+        }
+      ],
+      "folder_roles": [
+        {"id": "routes", "label": "Routes / Endpoints", "description": "Directory containing API route definitions", "placeholder": "src/api/routes"},
+        {"id": "services", "label": "Services / Business Logic", "description": "Directory containing service/business logic layer", "placeholder": "src/core/services"},
+        {"id": "repositories", "label": "Repositories / Data Access", "description": "Directory containing data access / repository layer", "placeholder": "src/data/repositories"},
+        {"id": "models", "label": "Models / Entities", "description": "Directory containing database models or domain entities", "placeholder": "src/data/models"},
+        {"id": "schemas", "label": "Schemas / DTOs", "description": "Directory containing Pydantic schemas or DTOs", "placeholder": "src/schemas"},
+        {"id": "middleware", "label": "Middleware", "description": "Directory containing middleware definitions", "placeholder": "src/api/middleware"},
+        {"id": "config", "label": "Configuration", "description": "Directory containing configuration files", "placeholder": "src/config"},
+        {"id": "tests", "label": "Tests", "description": "Directory containing test files", "placeholder": "tests"}
+      ]
+    },
+    "react": {
+      "categories": [
+        {
+          "id": "state_management",
+          "label": "State Management",
+          "description": "What state management solution does your frontend use?",
+          "required": true,
+          "options": [
+            {
+              "value": "redux_toolkit",
+              "label": "Redux Toolkit",
+              "evidence_markers": ["@reduxjs/toolkit", "createSlice", "configureStore", "useSelector", "useDispatch"],
+              "check_strategy": "redux_state"
+            },
+            {
+              "value": "zustand",
+              "label": "Zustand",
+              "evidence_markers": ["zustand", "create(", "useStore"],
+              "check_strategy": "zustand_state"
+            },
+            {
+              "value": "context_api",
+              "label": "React Context API",
+              "evidence_markers": ["createContext", "useContext", "Provider", "Context"],
+              "check_strategy": "context_state"
+            },
+            {
+              "value": "recoil",
+              "label": "Recoil",
+              "evidence_markers": ["recoil", "atom(", "selector(", "useRecoilState", "useRecoilValue"],
+              "check_strategy": "recoil_state"
+            },
+            {
+              "value": "jotai",
+              "label": "Jotai",
+              "evidence_markers": ["jotai", "atom(", "useAtom"],
+              "check_strategy": "jotai_state"
+            },
+            {
+              "value": "mobx",
+              "label": "MobX",
+              "evidence_markers": ["mobx", "makeAutoObservable", "observer", "observable", "action"],
+              "check_strategy": "mobx_state"
+            },
+            {
+              "value": "none",
+              "label": "No State Management (local state only)",
+              "evidence_markers": ["useState"],
+              "check_strategy": "no_state_management"
+            }
+          ]
+        },
+        {
+          "id": "http_client",
+          "label": "HTTP Client",
+          "description": "What HTTP client does your frontend use for API calls?",
+          "required": true,
+          "options": [
+            {
+              "value": "axios",
+              "label": "Axios",
+              "evidence_markers": ["axios", "axios.get", "axios.post", "axios.create"],
+              "check_strategy": "axios_http"
+            },
+            {
+              "value": "fetch",
+              "label": "Fetch API",
+              "evidence_markers": ["fetch(", "Response", "json()"],
+              "check_strategy": "fetch_http"
+            },
+            {
+              "value": "react_query",
+              "label": "React Query / TanStack Query",
+              "evidence_markers": ["@tanstack/react-query", "useQuery", "useMutation", "QueryClient"],
+              "check_strategy": "react_query_http"
+            },
+            {
+              "value": "swr",
+              "label": "SWR",
+              "evidence_markers": ["swr", "useSWR", "useSWRMutation"],
+              "check_strategy": "swr_http"
+            },
+            {
+              "value": "rtk_query",
+              "label": "RTK Query",
+              "evidence_markers": ["createApi", "fetchBaseQuery", "useGetQuery", "endpoints"],
+              "check_strategy": "rtk_query_http"
+            },
+            {
+              "value": "custom_client",
+              "label": "Custom HTTP Client",
+              "evidence_markers": ["apiClient", "httpClient", "request("],
+              "check_strategy": "custom_http"
+            }
+          ]
+        },
+        {
+          "id": "routing",
+          "label": "Routing",
+          "description": "What routing library does your frontend use?",
+          "required": true,
+          "options": [
+            {
+              "value": "react_router_v6",
+              "label": "React Router v6",
+              "evidence_markers": ["react-router-dom", "useRoutes", "createBrowserRouter", "RouterProvider", "Outlet"],
+              "check_strategy": "react_router_v6"
+            },
+            {
+              "value": "react_router_v5",
+              "label": "React Router v5",
+              "evidence_markers": ["react-router-dom", "Switch", "Route", "useHistory"],
+              "check_strategy": "react_router_v5"
+            },
+            {
+              "value": "next_router",
+              "label": "Next.js Router",
+              "evidence_markers": ["next/router", "next/navigation", "useRouter", "usePathname"],
+              "check_strategy": "next_router"
+            },
+            {
+              "value": "tanstack_router",
+              "label": "TanStack Router",
+              "evidence_markers": ["@tanstack/react-router", "createRouter", "createRoute"],
+              "check_strategy": "tanstack_router"
+            }
+          ]
+        },
+        {
+          "id": "auth_token_storage",
+          "label": "Auth Token Storage",
+          "description": "How does your frontend store authentication tokens?",
+          "required": true,
+          "options": [
+            {
+              "value": "httponly_cookie",
+              "label": "HTTP-Only Cookie (server-set)",
+              "evidence_markers": ["cookie", "httpOnly", "withCredentials", "credentials: 'include'"],
+              "check_strategy": "httponly_cookie_storage"
+            },
+            {
+              "value": "localstorage",
+              "label": "localStorage",
+              "evidence_markers": ["localStorage.setItem", "localStorage.getItem", "localStorage"],
+              "check_strategy": "localstorage_storage"
+            },
+            {
+              "value": "sessionstorage",
+              "label": "sessionStorage",
+              "evidence_markers": ["sessionStorage.setItem", "sessionStorage.getItem", "sessionStorage"],
+              "check_strategy": "sessionstorage_storage"
+            },
+            {
+              "value": "memory_only",
+              "label": "In-Memory Only (variable/state)",
+              "evidence_markers": ["useState", "useRef", "token", "accessToken"],
+              "check_strategy": "memory_storage"
+            },
+            {
+              "value": "auth_provider",
+              "label": "Auth Provider Library (Auth0, Firebase, etc.)",
+              "evidence_markers": ["Auth0", "firebase", "useAuth", "AuthProvider", "Clerk"],
+              "check_strategy": "auth_provider_storage"
+            }
+          ]
+        },
+        {
+          "id": "form_handling",
+          "label": "Form Handling",
+          "description": "How does your frontend handle forms?",
+          "required": false,
+          "options": [
+            {
+              "value": "react_hook_form",
+              "label": "React Hook Form",
+              "evidence_markers": ["react-hook-form", "useForm", "register", "handleSubmit", "Controller"],
+              "check_strategy": "react_hook_form"
+            },
+            {
+              "value": "formik",
+              "label": "Formik",
+              "evidence_markers": ["formik", "Formik", "useFormik", "Field", "ErrorMessage"],
+              "check_strategy": "formik_form"
+            },
+            {
+              "value": "native_state",
+              "label": "Native State (useState)",
+              "evidence_markers": ["useState", "onChange", "handleChange", "e.target.value"],
+              "check_strategy": "native_form"
+            },
+            {
+              "value": "zod_form",
+              "label": "Zod + Form Library",
+              "evidence_markers": ["zod", "z.object", "zodResolver", "z.string"],
+              "check_strategy": "zod_form"
+            },
+            {
+              "value": "final_form",
+              "label": "React Final Form",
+              "evidence_markers": ["react-final-form", "Form", "Field"],
+              "check_strategy": "final_form"
+            }
+          ]
+        },
+        {
+          "id": "component_architecture",
+          "label": "Component Architecture",
+          "description": "How are your frontend components organized?",
+          "required": true,
+          "options": [
+            {
+              "value": "atomic_design",
+              "label": "Atomic Design (atoms/molecules/organisms/templates/pages)",
+              "evidence_markers": ["atoms", "molecules", "organisms", "templates", "pages"],
+              "check_strategy": "atomic_components"
+            },
+            {
+              "value": "feature_based",
+              "label": "Feature-Based (features/module folders)",
+              "evidence_markers": ["features/", "modules/", "feature/"],
+              "check_strategy": "feature_components"
+            },
+            {
+              "value": "page_based",
+              "label": "Page-Based",
+              "evidence_markers": ["pages/", "views/"],
+              "check_strategy": "page_components"
+            },
+            {
+              "value": "hybrid",
+              "label": "Hybrid (shared + feature)",
+              "evidence_markers": ["components/", "features/", "shared/", "common/"],
+              "check_strategy": "hybrid_components"
+            },
+            {
+              "value": "flat",
+              "label": "Flat (all components in one directory)",
+              "evidence_markers": ["components/"],
+              "check_strategy": "flat_components"
+            }
+          ]
+        },
+        {
+          "id": "styling_approach",
+          "label": "Styling Approach",
+          "description": "What styling approach does your frontend use?",
+          "required": false,
+          "options": [
+            {
+              "value": "tailwind",
+              "label": "Tailwind CSS",
+              "evidence_markers": ["tailwindcss", "tailwind.config", "className=\"", "tw-"],
+              "check_strategy": "tailwind_styling"
+            },
+            {
+              "value": "css_modules",
+              "label": "CSS Modules",
+              "evidence_markers": [".module.css", ".module.scss", "styles.", "import styles"],
+              "check_strategy": "css_modules_styling"
+            },
+            {
+              "value": "styled_components",
+              "label": "Styled Components",
+              "evidence_markers": ["styled-components", "styled.", "css`"],
+              "check_strategy": "styled_components_styling"
+            },
+            {
+              "value": "emotion",
+              "label": "Emotion",
+              "evidence_markers": ["@emotion", "css(", "styled(", "jsx"],
+              "check_strategy": "emotion_styling"
+            },
+            {
+              "value": "sass",
+              "label": "SASS/SCSS",
+              "evidence_markers": [".scss", ".sass", "sass"],
+              "check_strategy": "sass_styling"
+            },
+            {
+              "value": "plain_css",
+              "label": "Plain CSS",
+              "evidence_markers": [".css", "import './"],
+              "check_strategy": "plain_css_styling"
+            }
+          ]
+        },
+        {
+          "id": "error_boundary",
+          "label": "Error Boundary",
+          "description": "How does your frontend handle runtime errors?",
+          "required": false,
+          "options": [
+            {
+              "value": "react_error_boundary_lib",
+              "label": "react-error-boundary Library",
+              "evidence_markers": ["react-error-boundary", "ErrorBoundary", "useErrorBoundary", "FallbackComponent"],
+              "check_strategy": "react_error_boundary"
+            },
+            {
+              "value": "custom_error_boundary",
+              "label": "Custom Error Boundary Component",
+              "evidence_markers": ["componentDidCatch", "getDerivedStateFromError", "ErrorBoundary"],
+              "check_strategy": "custom_error_boundary"
+            },
+            {
+              "value": "none",
+              "label": "No Error Boundary",
+              "evidence_markers": [],
+              "check_strategy": "no_error_boundary"
+            }
+          ]
+        },
+        {
+          "id": "api_layer_pattern",
+          "label": "API Layer Pattern",
+          "description": "How does your frontend organize API calls?",
+          "required": true,
+          "options": [
+            {
+              "value": "centralized_service",
+              "label": "Centralized Service Module",
+              "evidence_markers": ["apiService", "api/", "services/api", "httpClient"],
+              "check_strategy": "centralized_api_layer"
+            },
+            {
+              "value": "per_feature_service",
+              "label": "Per-Feature Service Modules",
+              "evidence_markers": ["services/", "Service.ts", "service.ts"],
+              "check_strategy": "per_feature_api_layer"
+            },
+            {
+              "value": "direct_in_component",
+              "label": "Direct Calls in Components",
+              "evidence_markers": ["fetch(", "axios.", "useEffect"],
+              "check_strategy": "direct_api_layer"
+            },
+            {
+              "value": "rtk_query_slice",
+              "label": "RTK Query API Slices",
+              "evidence_markers": ["createApi", "endpoints", "injectEndpoints"],
+              "check_strategy": "rtk_query_api_layer"
+            }
+          ]
+        },
+        {
+          "id": "env_config",
+          "label": "Environment Configuration",
+          "description": "How does your frontend manage environment variables?",
+          "required": true,
+          "options": [
+            {
+              "value": "vite_env",
+              "label": "Vite Environment Variables (import.meta.env)",
+              "evidence_markers": ["import.meta.env", "VITE_", "vite.config"],
+              "check_strategy": "vite_env_config"
+            },
+            {
+              "value": "dotenv",
+              "label": "dotenv / process.env",
+              "evidence_markers": ["process.env", "REACT_APP_", "dotenv"],
+              "check_strategy": "dotenv_env_config"
+            },
+            {
+              "value": "next_env",
+              "label": "Next.js Environment",
+              "evidence_markers": ["NEXT_PUBLIC_", "process.env", "next.config"],
+              "check_strategy": "next_env_config"
+            },
+            {
+              "value": "runtime_config",
+              "label": "Runtime Configuration",
+              "evidence_markers": ["window.__CONFIG", "runtime", "config.json"],
+              "check_strategy": "runtime_env_config"
+            }
+          ]
+        }
+      ],
+      "folder_roles": [
+        {"id": "components", "label": "Components", "description": "Directory containing reusable UI components", "placeholder": "src/components"},
+        {"id": "pages", "label": "Pages / Views", "description": "Directory containing page-level components", "placeholder": "src/pages"},
+        {"id": "services", "label": "Services / API Layer", "description": "Directory containing API service modules", "placeholder": "src/services"},
+        {"id": "hooks", "label": "Custom Hooks", "description": "Directory containing custom React hooks", "placeholder": "src/hooks"},
+        {"id": "store", "label": "Store / State", "description": "Directory containing state management files", "placeholder": "src/store"},
+        {"id": "types", "label": "Types / Interfaces", "description": "Directory containing TypeScript type definitions", "placeholder": "src/types"},
+        {"id": "utils", "label": "Utilities", "description": "Directory containing utility functions", "placeholder": "src/utils"},
+        {"id": "assets", "label": "Assets", "description": "Directory containing static assets", "placeholder": "src/assets"}
+      ]
+    }
+  }
+}

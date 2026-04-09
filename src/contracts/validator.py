@@ -83,7 +83,7 @@ class ContractValidator:
                     )
 
                 extra_fields = sorted(provided_fields - set(contract_fields.keys()))
-                if extra_fields:
+                if extra_fields and not call.payload_unresolved:
                     sensitive = [f for f in extra_fields if self._is_sensitive(f)]
                     severity = "critical" if sensitive else "high"
                     issue_type = "data_leakage" if sensitive else "extra_fields"
@@ -134,6 +134,10 @@ class ContractValidator:
                     )
 
             elif payload_fields and body_method and endpoint.method.upper() in {"POST", "PUT", "PATCH"}:
+                # Skip if the backend declares a request schema name (even without
+                # resolved fields) or the payload was unresolved on the frontend side
+                if endpoint.request_schema or call.payload_unresolved:
+                    continue
                 issues.append(
                     {
                         "type": "missing_backend_schema",

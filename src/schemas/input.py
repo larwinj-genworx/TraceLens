@@ -62,6 +62,10 @@ class AnalysisRequest(BaseModel):
             "or an object with {url, branch} keys."
         ),
     )
+    standard_id: str | None = Field(
+        default=None,
+        description="TraceLens standard ID to check against. When set, the analysis uses the user-defined standard for style-aware checking.",
+    )
     enable_runtime: bool = Field(default=True, description="Run runtime dockerized validation.")
     enable_llm_enhancement: bool = Field(default=True, description="Enable Groq-generated explanations and fixes.")
     runtime_timeout_seconds: int = Field(default=240, ge=30, le=1800)

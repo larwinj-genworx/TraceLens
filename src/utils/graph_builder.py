@@ -198,11 +198,12 @@ class ServiceGraphBuilder:
         parsed = urlparse(resolved) if resolved.startswith(("http://", "https://")) else None
 
         if parsed:
-            path = parsed.path or "/"
+            source_path = parsed.path or "/"
         else:
-            path = resolved if resolved.startswith("/") else f"/{resolved.lstrip('/')}"
+            source_path = resolved if resolved.startswith("/") else f"/{resolved.lstrip('/')}"
 
-        endpoint_path = endpoint.canonical_path or endpoint.path
+        path = call.canonical_path or canonicalize_url_path(source_path)
+        endpoint_path = endpoint.canonical_path or canonicalize_path(endpoint.path)
         path_score = self._path_similarity(path, endpoint_path)
 
         # Hard gate: discard the candidate immediately if path similarity is too
@@ -228,6 +229,12 @@ class ServiceGraphBuilder:
 
         return min(score, 1.0)
 
+    _API_PREFIX_RE = re.compile(r"^/(?:api/)?v\d+(?:/|$)", re.IGNORECASE)
+
+    def _strip_api_prefix(self, path: str) -> str:
+        """Strip common API version prefixes like /api/v1/ or /v2/ for matching."""
+        return self._API_PREFIX_RE.sub("/", path)
+
     def _path_similarity(self, source: str, target: str) -> float:
         """
         Score how closely a frontend URL path matches a backend endpoint path.
@@ -235,20 +242,30 @@ class ServiceGraphBuilder:
         Strategy (highest to lowest):
         1. Exact match after normalization → 1.0
         2. Dynamic path match (backend ``{param}`` as regex wildcard) → 0.9
-        3. Suffix-based match: does *target* appear as a suffix of *source*?
+        3. API-prefix-stripped match: try after removing /api/v1, /v2 etc.
+        4. Suffix-based match: does *target* appear as a suffix of *source*?
            This handles the common case where the frontend URL includes a version
            prefix (``/api/v1``) that is absent from the stored backend path.
-        4. Segment-level scoring across all positions without early break — a
+        5. Segment-level scoring across all positions without early break — a
            strict break at the first non-matching segment misses routes whose
            only difference is a leading version/api prefix.
         """
-        src = self._normalize_path(source)
-        tgt = self._normalize_path(target)
+        src = canonicalize_url_path(source)
+        tgt = canonicalize_path(target)
 
         if src == tgt:
             return 1.0
         if self._dynamic_path_match(src, tgt):
             return 0.9
+
+        # Try with API version prefixes stripped
+        src_stripped = self._strip_api_prefix(src)
+        tgt_stripped = self._strip_api_prefix(tgt)
+        if src_stripped != src or tgt_stripped != tgt:
+            if src_stripped == tgt_stripped:
+                return 0.95
+            if self._dynamic_path_match(src_stripped, tgt_stripped):
+                return 0.88
 
         src_parts = [p for p in src.split("/") if p]
         tgt_parts = [p for p in tgt.split("/") if p]
@@ -267,12 +284,14 @@ class ServiceGraphBuilder:
         segments) scores highly, with a small penalty proportional to how many
         extra prefix segments the source has.  This handles ``/api/v1/users/{id}``
         (frontend) vs ``/users/{id}`` (backend).
+
+        Also tries sliding alignment: for multi-segment paths with a common
+        API prefix mismatch, finds the best contiguous suffix overlap.
         """
         tgt_len = len(tgt_parts)
         src_len = len(src_parts)
 
         if tgt_len > src_len:
-            # Symmetry: if target is longer try reversed direction with penalty
             score = self._suffix_segment_score(tgt_parts, src_parts)
             return score * 0.95
 
@@ -281,7 +300,6 @@ class ServiceGraphBuilder:
         matched = sum(1 for s, t in zip(src_tail, tgt_parts) if self._segments_match(s, t))
 
         if matched == tgt_len:
-            # All target segments matched – penalise lightly for extra source prefix
             extra = src_len - tgt_len
             if extra == 0:
                 return 1.0
@@ -291,8 +309,24 @@ class ServiceGraphBuilder:
                 return 0.90
             return 0.82
 
+        # Sliding window: try all possible alignment offsets to find best match
+        # This handles cases where prefix segments differ on both sides
+        best_sliding = 0.0
+        min_len = min(src_len, tgt_len)
+        for offset in range(1, min_len):
+            # Align last N segments of both
+            src_slice = src_parts[src_len - offset:]
+            tgt_slice = tgt_parts[tgt_len - offset:]
+            sliding_matched = sum(
+                1 for s, t in zip(src_slice, tgt_slice) if self._segments_match(s, t)
+            )
+            if sliding_matched == offset and offset >= 2:
+                ratio = offset / max(src_len, tgt_len)
+                best_sliding = max(best_sliding, 0.70 + ratio * 0.25)
+
         # Partial suffix match
-        return matched / max(src_len, tgt_len)
+        suffix_score = matched / max(src_len, tgt_len)
+        return max(suffix_score, best_sliding)
 
     def _full_segment_score(self, src_parts: list[str], tgt_parts: list[str]) -> float:
         """
@@ -350,4 +384,4 @@ class ServiceGraphBuilder:
         return bool(re.match(pattern, source))
 
     def _normalize_path(self, path: str) -> str:
-        return canonicalize_path(path)
+        return canonicalize_url_path(path)
