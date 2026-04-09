@@ -20,7 +20,15 @@
     "/token/refresh",
     "/password/reset",
     "/email/verify",
-    "/invite/accept"
+    "/invite/accept",
+    "/auth/refresh",
+    "/auth/logout",
+    "/auth/forgot-password",
+    "/auth/reset-password",
+    "/auth/change-password",
+    "/auth/verify",
+    "/auth/verify-email",
+    "/users/me/change-password"
   ],
   "flows": [
     {

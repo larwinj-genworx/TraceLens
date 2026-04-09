@@ -33,9 +33,14 @@ async def analyze_integration(state: AgentState) -> dict[str, Any]:
         evidence_text = evidence_text[:_MAX_EVIDENCE_CHARS] + " ..."
     logger.info("integration_analyst evidence_chars=%d", len(evidence_text))
 
+    standards_ctx = state.get("standards_context", {})
+    system_prompt = INTEGRATION_ANALYST_SYSTEM
+    if standards_ctx:
+        system_prompt += _standards_addendum(standards_ctx)
+
     client = RateLimitedGroqClient(model=settings.groq_scanner_model)
     messages = [
-        SystemMessage(content=INTEGRATION_ANALYST_SYSTEM),
+        SystemMessage(content=system_prompt),
         HumanMessage(content=f"Analyse the following evidence and report integration/contract issues.\n\nEVIDENCE:\n{evidence_text}"),
     ]
 
@@ -48,6 +53,32 @@ async def analyze_integration(state: AgentState) -> dict[str, Any]:
 
     logger.info("integration_analyst done issues=%d", len(issues))
     return {"integration_issues": issues}
+
+
+def _standards_addendum(ctx: dict[str, Any]) -> str:
+    if not ctx:
+        return ""
+    parts = [
+        "\n\n--- USER-DECLARED STANDARDS CONTEXT ---",
+        f"Standard: {ctx.get('standard_name', '')}",
+    ]
+    react = ctx.get("react", {})
+    if react:
+        parts.append("Frontend (React) declared styles:")
+        for cat_id, cat_data in react.items():
+            if isinstance(cat_data, dict):
+                parts.append(f"  - {cat_id}: {cat_data.get('style', '?')}")
+    fastapi = ctx.get("fastapi", {})
+    if fastapi:
+        parts.append("Backend (FastAPI) declared styles:")
+        for cat_id, cat_data in fastapi.items():
+            if cat_id == "folder_structure":
+                continue
+            if isinstance(cat_data, dict):
+                parts.append(f"  - {cat_id}: {cat_data.get('style', '?')}")
+    parts.append("Use these declarations to calibrate findings against the declared architecture.")
+    parts.append("--- END STANDARDS CONTEXT ---")
+    return "\n".join(parts)
 
 
 def _trim_evidence(ev: dict[str, Any]) -> dict[str, Any]:

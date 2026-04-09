@@ -24,6 +24,16 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 
 
+def _build_upload_request(repo_inputs: list[RepoInput], cfg: dict[str, Any]) -> AnalysisRequest:
+    return AnalysisRequest(
+        repos=repo_inputs,
+        enable_runtime=cfg.get("enable_runtime", True),
+        enable_llm_enhancement=cfg.get("enable_llm_enhancement", True),
+        runtime_timeout_seconds=cfg.get("runtime_timeout_seconds", 240),
+        standard_id=cfg.get("standard_id"),
+    )
+
+
 @router.post("", response_model=AnalysisReport)
 async def analyze(
     payload: AnalysisRequest,
@@ -113,12 +123,7 @@ async def analyze_upload(
     if not repo_inputs:
         raise HTTPException(status_code=400, detail="No repositories provided (neither ZIPs nor URLs)")
 
-    request = AnalysisRequest(
-        repos=repo_inputs,
-        enable_runtime=cfg.get("enable_runtime", True),
-        enable_llm_enhancement=cfg.get("enable_llm_enhancement", True),
-        runtime_timeout_seconds=cfg.get("runtime_timeout_seconds", 240),
-    )
+    request = _build_upload_request(repo_inputs, cfg)
 
     job_id = await jobs.create_job()
 

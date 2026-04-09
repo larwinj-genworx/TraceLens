@@ -34,9 +34,21 @@ async def analyze_quality(state: AgentState) -> dict[str, Any]:
         evidence_text = evidence_text[:_MAX_EVIDENCE_CHARS] + " ..."
     logger.info("quality_analyst evidence_chars=%d", len(evidence_text))
 
+    standards_ctx = state.get("standards_context", {})
+    system_prompt = QUALITY_ANALYST_SYSTEM
+    if standards_ctx:
+        arch = standards_ctx.get("fastapi", {}).get("architecture_pattern", {})
+        if isinstance(arch, dict) and arch.get("style"):
+            system_prompt += (
+                f"\n\n--- STANDARDS CONTEXT ---\n"
+                f"Architecture pattern: {arch['style']}\n"
+                f"Use this to calibrate architecture-related quality findings.\n"
+                f"--- END STANDARDS CONTEXT ---"
+            )
+
     client = RateLimitedGroqClient(model=settings.groq_scanner_model)
     messages = [
-        SystemMessage(content=QUALITY_ANALYST_SYSTEM),
+        SystemMessage(content=system_prompt),
         HumanMessage(content=f"Analyse the following evidence and report code quality issues.\n\nEVIDENCE:\n{evidence_text}"),
     ]
 

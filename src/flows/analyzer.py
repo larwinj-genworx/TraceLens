@@ -29,6 +29,57 @@ from src.utils.canonicalization import (
 class MandatoryFlowAnalyzer:
     def __init__(self, catalog_loader: FlowCatalogLoader | None = None) -> None:
         self.catalog_loader = catalog_loader or FlowCatalogLoader()
+        self._resolved_standard = None
+
+    def set_resolved_standard(self, resolved: object | None) -> None:
+        """Inject a ResolvedStandard to override catalog markers with
+        user-declared style-specific markers."""
+        self._resolved_standard = resolved
+
+    def _get_standard_markers_for_flow(self, flow_id: str) -> list[str] | None:
+        """Return style-specific markers from the resolved standard for a flow,
+        or None to fall back to the catalog defaults."""
+        rs = self._resolved_standard
+        if rs is None or not hasattr(rs, "fastapi"):
+            return None
+
+        mapping = {
+            "authn_flow": "auth_style",
+            "authz_flow": "authz_model",
+            "ownership_flow": "ownership_protection",
+            "request_validation_flow": "request_validation",
+            "response_contract_flow": "response_contract",
+            "error_handling_flow": "error_handling",
+            "input_sanitization_flow": "input_sanitization",
+            "rate_limit_flow": "rate_limiting",
+        }
+
+        cat_id = mapping.get(flow_id)
+        if not cat_id:
+            return None
+
+        markers = rs.fastapi.get_markers(cat_id)
+        return markers if markers else None
+
+    def _get_standard_strategy_for_flow(self, flow_id: str) -> str | None:
+        rs = self._resolved_standard
+        if rs is None or not hasattr(rs, "fastapi"):
+            return None
+        mapping = {
+            "authn_flow": "auth_style",
+            "authz_flow": "authz_model",
+            "ownership_flow": "ownership_protection",
+            "request_validation_flow": "request_validation",
+            "response_contract_flow": "response_contract",
+            "error_handling_flow": "error_handling",
+            "input_sanitization_flow": "input_sanitization",
+            "rate_limit_flow": "rate_limiting",
+        }
+        cat_id = mapping.get(flow_id)
+        if not cat_id:
+            return None
+        strategy = rs.fastapi.get_strategy(cat_id)
+        return strategy or None
 
     def evaluate(
         self,
@@ -53,6 +104,10 @@ class MandatoryFlowAnalyzer:
                 + static.fastapi_facts.global_dependencies
                 + static.fastapi_facts.module_call_refs
             )
+            route_refs = self._normalize_values(
+                static.fastapi_facts.middleware_refs
+                + static.fastapi_facts.global_dependencies
+            )
 
             auth_middleware = self._detect_auth_middleware(static.fastapi_facts.middleware_refs)
 
@@ -62,7 +117,7 @@ class MandatoryFlowAnalyzer:
                 endpoint.route_intent = endpoint.route_intent or classify_route_intent(
                     endpoint.path,
                     endpoint.method,
-                    endpoint_refs + global_refs,
+                    endpoint_refs + route_refs,
                 )
                 endpoint.auth_mode = classify_auth_mode(endpoint, static.fastapi_facts)
                 endpoint.ownership_mode = classify_ownership_mode(endpoint)
@@ -301,7 +356,12 @@ class MandatoryFlowAnalyzer:
         sensitive_response_fields: list[str],
         auth_middleware: list[str] | None = None,
     ) -> tuple[FlowStatus, float, dict]:
-        covered_markers = flow.covered_markers
+        standard_markers = self._get_standard_markers_for_flow(flow.id)
+        standard_strategy = self._get_standard_strategy_for_flow(flow.id)
+        if standard_markers is not None:
+            covered_markers = standard_markers + flow.covered_markers
+        else:
+            covered_markers = flow.covered_markers
         ambiguous_markers = flow.ambiguous_markers
 
         covered_hits = self._matched_markers(refs, covered_markers)
@@ -320,17 +380,93 @@ class MandatoryFlowAnalyzer:
                 "canonical_path": endpoint.canonical_path,
                 "auth_deps": endpoint.dependencies,
             }
+            if standard_strategy == "no_auth":
+                return (
+                    FlowStatus.COVERED,
+                    1.0,
+                    {**base_evidence, "covered_by": ["standard_declared_no_auth"]},
+                )
             if endpoint.auth_mode == "public":
                 return (
                     FlowStatus.COVERED,
                     1.0,
                     {**base_evidence, "covered_by": ["public_route"]},
                 )
+            if standard_strategy == "middleware_auth":
+                if auth_middleware:
+                    return (
+                        FlowStatus.COVERED,
+                        0.92,
+                        {
+                            **base_evidence,
+                            "auth_middleware": auth_middleware,
+                            "covered_by": "middleware",
+                        },
+                    )
+                return (
+                    FlowStatus.MISSING,
+                    0.9,
+                    {**base_evidence, "reason": "missing_declared_auth_middleware"},
+                )
+            if standard_strategy == "dep_injection_auth":
+                dep_refs = self._normalize_values(endpoint.dependencies)
+                dep_covered = self._matched_markers(dep_refs, covered_markers)
+                if dep_covered:
+                    return (
+                        FlowStatus.COVERED,
+                        0.93,
+                        {**base_evidence, "covered_by": dep_covered},
+                    )
+                return (
+                    FlowStatus.MISSING,
+                    0.9,
+                    {**base_evidence, "reason": "missing_declared_auth_dependency"},
+                )
+            if standard_strategy == "decorator_auth":
+                decorator_hits = self._matched_markers(
+                    self._normalize_values(endpoint.decorators),
+                    covered_markers,
+                )
+                if decorator_hits:
+                    return (
+                        FlowStatus.COVERED,
+                        0.9,
+                        {**base_evidence, "covered_by": decorator_hits},
+                    )
+                return (
+                    FlowStatus.MISSING,
+                    0.88,
+                    {**base_evidence, "reason": "missing_declared_auth_decorator"},
+                )
+            if standard_strategy == "service_auth":
+                service_hits = self._matched_markers(
+                    self._normalize_values(endpoint.call_refs + endpoint.string_refs),
+                    covered_markers,
+                )
+                if service_hits:
+                    return (
+                        FlowStatus.COVERED,
+                        0.86,
+                        {**base_evidence, "covered_by": service_hits},
+                    )
+                return (
+                    FlowStatus.MISSING,
+                    0.86,
+                    {**base_evidence, "reason": "missing_declared_auth_service_call"},
+                )
             if endpoint.auth_mode == "service_auth":
                 return (
                     FlowStatus.COVERED,
                     0.94,
                     {**base_evidence, "covered_by": ["service_auth"]},
+                )
+            dep_refs = self._normalize_values(endpoint.dependencies)
+            dep_covered = self._matched_markers(dep_refs, covered_markers)
+            if dep_covered:
+                return (
+                    FlowStatus.COVERED,
+                    0.92,
+                    {**base_evidence, "covered_by": dep_covered},
                 )
             if endpoint.auth_mode == "middleware_auth":
                 return (
@@ -339,7 +475,7 @@ class MandatoryFlowAnalyzer:
                     {
                         **base_evidence,
                         "auth_middleware": auth_middleware,
-                        "covered_by": ["middleware"],
+                        "covered_by": "middleware",
                     },
                 )
             if endpoint.auth_mode == "user_auth":
@@ -353,15 +489,6 @@ class MandatoryFlowAnalyzer:
                     FlowStatus.AMBIGUOUS,
                     0.58,
                     {**base_evidence, "ambiguous_hints": ambiguous_hits or ["identity_marker"]},
-                )
-
-            dep_refs = self._normalize_values(endpoint.dependencies)
-            dep_covered = self._matched_markers(dep_refs, covered_markers)
-            if dep_covered:
-                return (
-                    FlowStatus.COVERED,
-                    0.92,
-                    {**base_evidence, "covered_by": dep_covered},
                 )
 
             if auth_middleware:
@@ -406,6 +533,27 @@ class MandatoryFlowAnalyzer:
                     0.58,
                     {**base_evidence, "ambiguous_hits": ambiguous_hits or endpoint.call_refs[:8]},
                 )
+            signals = endpoint.service_call_signals
+            if signals.has_identity_comparison and signals.has_authorization_raise:
+                return (
+                    FlowStatus.COVERED,
+                    0.88,
+                    {
+                        **base_evidence,
+                        "covered_by": ["service_layer_ownership_check"],
+                        "identity_attrs": signals.identity_attrs_compared,
+                    },
+                )
+            if signals.has_identity_comparison or signals.has_identity_filter:
+                return (
+                    FlowStatus.AMBIGUOUS,
+                    0.65,
+                    {
+                        **base_evidence,
+                        "ambiguous_hints": ["service_layer_identity_reference"],
+                        "identity_attrs": signals.identity_attrs_compared,
+                    },
+                )
             return (
                 FlowStatus.MISSING,
                 0.86,
@@ -413,6 +561,24 @@ class MandatoryFlowAnalyzer:
             )
 
         if flow.id == "request_validation_flow":
+            if not endpoint.expects_request_body:
+                return (
+                    FlowStatus.NOT_APPLICABLE,
+                    1.0,
+                    {"reason": "endpoint_has_no_request_body"},
+                )
+            if standard_strategy == "pydantic_validation":
+                if endpoint.request_schema:
+                    return (
+                        FlowStatus.COVERED,
+                        0.95,
+                        {"request_schema": endpoint.request_schema, "covered_by": ["request_schema"]},
+                    )
+                return (
+                    FlowStatus.MISSING,
+                    0.9,
+                    {"reason": "missing_pydantic_request_schema"},
+                )
             if endpoint.request_schema:
                 return (
                     FlowStatus.COVERED,
@@ -421,6 +587,34 @@ class MandatoryFlowAnalyzer:
                 )
 
         if flow.id == "response_contract_flow":
+            if endpoint.returns_file_response:
+                return (
+                    FlowStatus.NOT_APPLICABLE,
+                    1.0,
+                    {"reason": "binary_file_response"},
+                )
+            if endpoint.status_code_literal and endpoint.status_code_literal == 204:
+                return (
+                    FlowStatus.NOT_APPLICABLE,
+                    1.0,
+                    {"reason": "no_content_response"},
+                )
+            if standard_strategy == "response_model_contract":
+                if endpoint.response_schema or endpoint.response_fields:
+                    return (
+                        FlowStatus.COVERED,
+                        0.95,
+                        {
+                            "response_schema": endpoint.response_schema,
+                            "response_field_count": len(endpoint.response_fields),
+                            "covered_by": ["response_model"],
+                        },
+                    )
+                return (
+                    FlowStatus.MISSING,
+                    0.9,
+                    {"reason": "missing_declared_response_model"},
+                )
             if endpoint.response_schema or endpoint.response_fields:
                 return (
                     FlowStatus.COVERED,
@@ -431,6 +625,19 @@ class MandatoryFlowAnalyzer:
                         "covered_by": ["response_model"],
                     },
                 )
+
+        if flow.id == "error_handling_flow" and standard_strategy == "per_route_error_handling":
+            if endpoint.has_try_except:
+                return (
+                    FlowStatus.COVERED,
+                    0.9,
+                    {"covered_by": ["try_except"]},
+                )
+            return (
+                FlowStatus.MISSING,
+                0.88,
+                {"reason": "missing_per_route_try_except"},
+            )
 
         if flow.id == "error_handling_flow" and endpoint.has_try_except:
             return (

@@ -4,8 +4,17 @@ import ast
 import re
 from pathlib import Path
 
+from src.analyzers.fastapi.dependency_analyzer import DependencyAnalyzer
+from src.analyzers.fastapi.service_call_tracer import ServiceCallTracer
 from src.observability.logging.setup import get_logger
-from src.schemas.internal import BackendEndpoint, CorsConfig, FastAPIGlobalFacts, SchemaField, StaticAnalysisResult
+from src.schemas.internal import (
+    AuthMiddlewareAnalysisResult,
+    BackendEndpoint,
+    CorsConfig,
+    FastAPIGlobalFacts,
+    SchemaField,
+    StaticAnalysisResult,
+)
 
 logger = get_logger(__name__)
 
@@ -130,6 +139,37 @@ class FastAPIParser:
                 logger.exception("fastapi_module_parse_failed file=%s", file_path, extra={"request_id": "-"})
                 parser_errors.append(f"{file_path}: parser failure {exc}")
 
+        # ── Phase 1c: AST-based dependency classification ────────────────
+        dep_analyzer = DependencyAnalyzer(file_asts, module_to_file)
+        for ep in endpoints:
+            ep.dep_classifications = dep_analyzer.classify_endpoint_deps(ep.dependencies)
+            auth_mechs = [
+                dc.split(":", 1)[1]
+                for dc in ep.dep_classifications
+                if dc.startswith("auth:") and ":" in dc
+            ]
+            if auth_mechs:
+                ep.auth_mechanism_detected = auth_mechs[0]
+
+        # ── Phase 1d: service call-chain tracing ─────────────────────────
+        call_tracer = ServiceCallTracer(file_asts, module_to_file)
+        handler_nodes = self._collect_handler_nodes(file_asts, endpoints)
+        for ep, handler_node in handler_nodes:
+            if handler_node is not None:
+                ep.service_call_signals = call_tracer.trace_handler_calls(handler_node)
+
+        # Analyze middleware for auth behaviour
+        auth_mw_analysis: AuthMiddlewareAnalysisResult | None = None
+        mw_analysis_raw = dep_analyzer.analyze_middleware(sorted(middleware_refs))
+        if mw_analysis_raw:
+            auth_mw_analysis = AuthMiddlewareAnalysisResult(
+                middleware_name=mw_analysis_raw.middleware_name,
+                mechanism=mw_analysis_raw.mechanism,
+                public_paths=mw_analysis_raw.public_paths,
+                websocket_excluded=mw_analysis_raw.websocket_excluded,
+                sets_request_state=mw_analysis_raw.sets_request_state,
+            )
+
         return StaticAnalysisResult(
             repo=repo_name,
             backend_endpoints=endpoints,
@@ -143,6 +183,7 @@ class FastAPIParser:
                 global_dependencies=sorted(global_dependencies),
                 module_call_refs=sorted(module_call_refs),
                 cors_config=merged_cors_config,
+                auth_middleware_analysis=auth_mw_analysis,
             ),
         )
 
@@ -523,6 +564,41 @@ class FastAPIParser:
         return endpoints, module_facts
 
     # ──────────────────────────────────────────────────────────────────────────
+    # Handler node collector (for service call tracer)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _collect_handler_nodes(
+        self,
+        file_asts: dict[str, tuple[Path, ast.Module]],
+        endpoints: list[BackendEndpoint],
+    ) -> list[tuple[BackendEndpoint, ast.FunctionDef | ast.AsyncFunctionDef | None]]:
+        """Pair each endpoint with its handler AST node for deep analysis."""
+        func_index: dict[tuple[str, str], ast.FunctionDef | ast.AsyncFunctionDef] = {}
+        for file_str, (file_path, tree) in file_asts.items():
+            try:
+                rel = str(file_path.relative_to(file_path.parents[len(file_path.parts) - 2]))
+            except (ValueError, IndexError):
+                rel = file_str
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    func_index[(file_str, node.name)] = node
+                    func_index[(rel, node.name)] = node
+
+        result: list[tuple[BackendEndpoint, ast.FunctionDef | ast.AsyncFunctionDef | None]] = []
+        for ep in endpoints:
+            handler = None
+            if ep.function_name:
+                for file_str in file_asts:
+                    if file_str.endswith(ep.file) or ep.file in file_str:
+                        handler = func_index.get((file_str, ep.function_name))
+                        if handler:
+                            break
+                if handler is None:
+                    handler = func_index.get((ep.file, ep.function_name))
+            result.append((ep, handler))
+        return result
+
+    # ──────────────────────────────────────────────────────────────────────────
     # Endpoint extraction helpers
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -548,6 +624,7 @@ class FastAPIParser:
         wrapper_decorators = self._extract_non_route_decorators(node.decorator_list)
         has_try_except = self._contains_try_except(node)
         redacted_fields = self._detect_redacted_response_fields(node)
+        returns_file_response = self._detect_file_response(node)
 
         for decorator in node.decorator_list:
             if not isinstance(decorator, ast.Call) or not isinstance(decorator.func, ast.Attribute):
@@ -580,6 +657,7 @@ class FastAPIParser:
             # Look up response fields using the base model name (unwraps List[T], Optional[T], etc.)
             response_base = self._base_model_name(response_schema) if response_schema else None
             response_fields = pydantic_models.get(response_base, []) if response_base else []
+            status_code_literal = self._extract_status_code_literal(decorator)
 
             decorator_dependencies = self._extract_dependencies_from_decorator(decorator)
             scoped_dependencies = list(arg_dependencies + decorator_dependencies)
@@ -594,6 +672,8 @@ class FastAPIParser:
             except ValueError:
                 rel_file = str(file_path)
             line_number = getattr(decorator, "lineno", None) or getattr(node, "lineno", None)
+
+            expects_body = request_schema is not None or self._has_body_param(node, pydantic_models)
 
             for method in method_candidates:
                 extracted.append(
@@ -615,6 +695,9 @@ class FastAPIParser:
                         call_refs=call_refs,
                         string_refs=string_refs,
                         has_try_except=has_try_except,
+                        expects_request_body=expects_body,
+                        returns_file_response=returns_file_response,
+                        status_code_literal=status_code_literal,
                     )
                 )
 
@@ -680,6 +763,19 @@ class FastAPIParser:
             base_name = self._base_model_name(annotation)
             if base_name in pydantic_models:
                 return annotation, pydantic_models[base_name]
+            # Fallback: if the annotation looks like a model type (starts with uppercase,
+            # not a builtin), record it even without field details to avoid
+            # missing_backend_schema false positives.
+            if (
+                base_name
+                and base_name[0].isupper()
+                and base_name not in {
+                    "Request", "Response", "WebSocket",
+                    "Dict", "List", "Set", "Tuple", "Optional", "Union",
+                    "Any", "Callable", "Type", "Sequence",
+                }
+            ):
+                return annotation, []
         return None, []
 
     def _extract_dependencies_from_args(
@@ -929,6 +1025,85 @@ class FastAPIParser:
                     methods.append(item.value.upper())
             return methods
         return ["GET"]
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Endpoint-intent metadata detection
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _has_body_param(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+        pydantic_models: dict[str, list],
+    ) -> bool:
+        """Check if the handler has any parameter that could be a request body.
+
+        Returns True when at least one arg is NOT a known non-body kind and
+        is NOT in the skip list, indicating it could receive body data.
+        """
+        arg_default: dict[str, ast.expr] = {}
+        n_pos = len(node.args.args)
+        n_def = len(node.args.defaults)
+        for offset, default in enumerate(node.args.defaults):
+            idx = n_pos - n_def + offset
+            if 0 <= idx < n_pos:
+                arg_default[node.args.args[idx].arg] = default
+        for kw_arg, kw_default in zip(node.args.kwonlyargs, node.args.kw_defaults):
+            if kw_default is not None:
+                arg_default[kw_arg.arg] = kw_default
+
+        for arg in node.args.args + node.args.kwonlyargs:
+            if arg.arg in _SKIP_ARG_NAMES:
+                continue
+            if arg.annotation is None:
+                continue
+            default = arg_default.get(arg.arg)
+            if default is not None and isinstance(default, ast.Call):
+                short = self._resolve_name(default.func).split(".")[-1]
+                if short in _FASTAPI_NON_BODY_DEFAULTS:
+                    continue
+            ann = self._annotation_to_str(arg.annotation)
+            base = self._base_model_name(ann)
+            if base in pydantic_models:
+                return True
+        return False
+
+    def _detect_file_response(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+        """Detect if handler returns a file/stream response (AST-based)."""
+        _FILE_RESPONSE_TYPES = {
+            "FileResponse", "StreamingResponse", "Response",
+        }
+        # Check return annotation
+        if node.returns:
+            ann = self._annotation_to_str(node.returns)
+            base = ann.split(".")[-1]
+            if base in _FILE_RESPONSE_TYPES:
+                return True
+
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Return) or child.value is None:
+                continue
+            ret = child.value
+            if isinstance(ret, ast.Call):
+                callee = self._resolve_name(ret.func).split(".")[-1]
+                if callee in _FILE_RESPONSE_TYPES:
+                    return True
+        return False
+
+    def _extract_status_code_literal(self, decorator: ast.Call) -> int | None:
+        """Extract status_code from route decorator (e.g. @router.post(..., status_code=204))."""
+        for kw in decorator.keywords:
+            if kw.arg != "status_code":
+                continue
+            if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, int):
+                return kw.value.value
+            if isinstance(kw.value, ast.Attribute):
+                attr = kw.value.attr.upper()
+                # Parse numeric suffix from names like HTTP_204_NO_CONTENT
+                parts = attr.split("_")
+                for part in parts:
+                    if part.isdigit():
+                        return int(part)
+        return None
 
     # ──────────────────────────────────────────────────────────────────────────
     # AST utility methods

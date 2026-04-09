@@ -22,7 +22,13 @@ from src.runtime.orchestrator import RuntimeOrchestrator
 from src.schemas.input import AnalysisRequest
 from src.schemas.internal import AnalysisContext, RepoType, RuntimeExecutionResult, StaticAnalysisResult, TypeDiagnostic
 from src.schemas.issues import ConfidenceBand, Issue, Severity
-from src.schemas.report import AnalysisReport, ReportSummary
+from src.schemas.report import AnalysisReport, ReportSummary, StandardsComplianceSection
+from src.flows.catalog import FlowCatalogLoader
+from src.standards.coverage_tracker import EndpointCoverageTracker
+from src.standards.evidence_collectors.collector import StandardsEvidenceCollector
+from src.standards.evidence_to_issues import convert_evidence_to_issues
+from src.standards.marker_registry import MarkerRegistry
+from src.standards.resolver import ResolvedStandard, StandardsResolver
 from src.utils.canonicalization import normalize_static_results
 from src.utils.env_infer import EnvInferenceEngine
 from src.utils.graph_builder import ServiceGraphBuilder
@@ -51,6 +57,24 @@ class ValidationOrchestrator:
     async def run(self, request: AnalysisRequest, progress_cb: ProgressCallback | None = None, job_id: str | None = None) -> AnalysisReport:
         assumptions: list[str] = []
 
+        # Load and resolve TraceLens standard if specified
+        resolved_standard: ResolvedStandard | None = None
+        standards_context: dict[str, Any] = {}
+        if request.standard_id:
+            await self._emit(progress_cb, "standards_loading", "Loading TraceLens standard")
+            try:
+                from src.core.services.standards_service import TraceLensStandardsService
+                std_service = TraceLensStandardsService()
+                standard = std_service.get_standard(request.standard_id)
+                resolver = StandardsResolver()
+                resolved_standard = resolver.resolve(standard)
+                standards_context = resolved_standard.to_prompt_context()
+                assumptions.append(f"Using TraceLens standard: {standard.name} (id: {standard.standard_id})")
+                logger.info("orchestrator loaded standard=%s", standard.standard_id)
+            except Exception as exc:
+                logger.warning("orchestrator failed to load standard %s: %s", request.standard_id, exc)
+                assumptions.append(f"Failed to load standard '{request.standard_id}': {exc}")
+
         await self._emit(progress_cb, "repo_loading", "Loading and cloning repositories")
         repos, load_assumptions = self.repo_loader.load(list(request.repos))
         assumptions.extend(load_assumptions)
@@ -75,7 +99,27 @@ class ValidationOrchestrator:
 
             static_results[repo.name] = self._merge_static_results(repo.name, fastapi_result, react_result)
 
-        normalize_static_results(static_results)
+        # Build the MarkerRegistry for unified marker management
+        flow_catalog = FlowCatalogLoader().load()
+        marker_registry = MarkerRegistry(
+            resolved=resolved_standard,
+            flow_catalog=flow_catalog,
+        )
+        if resolved_standard:
+            # Wire public paths from user standard if provided
+            from src.core.services.standards_service import TraceLensStandardsService as _StdSvc
+            try:
+                _std = _StdSvc().get_standard(request.standard_id) if request.standard_id else None
+                if _std and _std.public_paths:
+                    marker_registry.set_user_public_paths(_std.public_paths)
+            except Exception:
+                pass
+
+        # Set the active registry for auth evidence collectors
+        import src.standards.evidence_collectors.auth_evidence as _auth_ev
+        _auth_ev._active_registry = marker_registry
+
+        normalize_static_results(static_results, registry=marker_registry)
 
         await self._emit(progress_cb, "typecheck", "Running best-effort type diagnostics")
         type_diagnostics = self.type_diagnostics.run(repos)
@@ -115,7 +159,12 @@ class ValidationOrchestrator:
         await self._emit(progress_cb, "data_flow", "Performing end-to-end data flow validation")
         contract_issues.extend(self._validate_data_flow(graph_result, runtime_result))
 
+        # ── Mandatory flows always run (independent of user-selected standards) ──
+        # MandatoryFlowAnalyzer uses mandatory_flows_v1.json catalog markers.
+        # The resolved standard is only used for supplementary context, not gating.
         await self._emit(progress_cb, "mandatory_flow_index", "Building mandatory-flow coverage index")
+        if resolved_standard:
+            self.mandatory_flow_analyzer.set_resolved_standard(resolved_standard)
         mandatory_flow_result = self.mandatory_flow_analyzer.evaluate(static_results, runtime_result=runtime_result)
         await self._emit(
             progress_cb,
@@ -148,6 +197,53 @@ class ValidationOrchestrator:
         deterministic_issues = self.rule_engine.evaluate(context)
         logger.info("orchestrator deterministic_issues=%d", len(deterministic_issues))
 
+        # ── Standards evidence runs ONLY when a user standard is selected ──
+        # StandardsEvidenceCollector validates against user-chosen categories.
+        # Without a standard, only mandatory flow issues are reported.
+        standards_evidence_results = []
+        standards_violation_issues: list[Issue] = []
+        coverage_matrix_data: dict[str, Any] = {}
+        standards_coverage_tracker: EndpointCoverageTracker | None = None
+        if (
+            resolved_standard
+            and resolved_standard.has_standard()
+            and settings.strict_standards_mode
+        ):
+            await self._emit(progress_cb, "standards_check", "Running standards-aware evidence collection")
+            evidence_collector = StandardsEvidenceCollector(resolved_standard)
+            repo_paths = {r.name: r.local_path for r in repos if r.local_path}
+            repo_types = {r.name: r.repo_type.value for r in repos}
+            standards_evidence_results = evidence_collector.collect_all(
+                static_results,
+                repo_paths=repo_paths,
+                repo_types=repo_types,
+            )
+
+            standards_coverage_tracker = EndpointCoverageTracker(resolved_standard)
+            standards_coverage_tracker.build_matrix(
+                static_results,
+                repo_types=repo_types,
+            )
+            standards_coverage_tracker.mark_checked(standards_evidence_results)
+            coverage_matrix = standards_coverage_tracker.get_matrix()
+            coverage_matrix_data = coverage_matrix.to_dict()
+
+            logger.info(
+                "orchestrator standards_check categories=%d coverage=%.1f%%",
+                len(standards_evidence_results),
+                coverage_matrix.coverage_pct,
+            )
+
+            standards_violation_issues = convert_evidence_to_issues(
+                standards_evidence_results
+            )
+            if standards_violation_issues:
+                deterministic_issues.extend(standards_violation_issues)
+                logger.info(
+                    "orchestrator standards violations converted=%d",
+                    len(standards_violation_issues),
+                )
+
         mode = settings.analysis_mode
         llm_enabled = bool(request.enable_llm_enhancement and settings.groq_api_key)
         use_agentic = llm_enabled and mode in {"agentic", "hybrid"}
@@ -161,6 +257,7 @@ class ValidationOrchestrator:
                 context=context,
                 progress_cb=progress_cb,
                 job_id=job_id,
+                standards_context=standards_context,
             )
             assumptions.extend(agent_observations)
 
@@ -180,12 +277,155 @@ class ValidationOrchestrator:
                 await self._emit(progress_cb, "llm", "Enhancing explanations and fixes via Groq")
                 issues = await self.groq_client.enhance_issues(issues)
 
+        # Run 4-layer false positive elimination pipeline if standards are active
+        if (
+            resolved_standard
+            and resolved_standard.has_standard()
+            and standards_evidence_results
+            and settings.strict_standards_mode
+        ):
+            from src.standards.filters.pipeline import run_false_positive_pipeline
+            pre_fp_count = len(issues)
+            issues = run_false_positive_pipeline(
+                issues, resolved_standard, standards_evidence_results
+            )
+            logger.info(
+                "orchestrator fp_pipeline reduced issues %d -> %d",
+                pre_fp_count,
+                len(issues),
+            )
+
         issues, advisories = self._finalize_issues(issues)
 
         await self._emit(progress_cb, "report", "Building final report")
         summary = self._build_summary(issues)
 
         assumptions.extend(self._residual_assumptions(repos, static_results, runtime_result))
+
+        standards_compliance_sections: list[StandardsComplianceSection] = []
+        folder_structure_compliance: StandardsComplianceSection | None = None
+        mandatory_compliance_sections: list[StandardsComplianceSection] = []
+        issue_by_category: dict[str, list[Issue]] = {}
+        for issue in issues:
+            cat = self._extract_standards_category(issue)
+            if not cat:
+                continue
+            issue_by_category.setdefault(cat, []).append(issue)
+
+        # Run accuracy validation and coverage verification
+        if (
+            resolved_standard
+            and resolved_standard.has_standard()
+            and settings.strict_standards_mode
+        ):
+            from src.diagnostics.accuracy_validator import AccuracyValidator
+            from src.standards.coverage_verifier import CoverageVerifier
+
+            accuracy_validator = AccuracyValidator(resolved_standard)
+            accuracy_result = accuracy_validator.validate(issues, standards_evidence_results)
+            if accuracy_result.warnings:
+                assumptions.extend(
+                    [f"[accuracy] {w}" for w in accuracy_result.warnings]
+                )
+            if job_id:
+                accuracy_validator.dump_trace(job_id, accuracy_result)
+
+            cov_verifier = CoverageVerifier(resolved_standard)
+            coverage_matrix_obj = (
+                standards_coverage_tracker.get_matrix()
+                if standards_coverage_tracker
+                else None
+            )
+            cov_result = cov_verifier.verify(
+                static_results,
+                standards_evidence_results,
+                coverage_matrix=coverage_matrix_obj,
+            )
+            if cov_result.warnings:
+                assumptions.extend(
+                    [f"[coverage] {w}" for w in cov_result.warnings]
+                )
+
+            logger.info(
+                "orchestrator accuracy=%.1f%% coverage=%.1f%%",
+                accuracy_result.accuracy_score,
+                cov_result.coverage_pct,
+            )
+
+        # Build standards compliance sections for report model.
+        for ev_result in standards_evidence_results:
+            section = StandardsComplianceSection(
+                category=ev_result.category,
+                declared_style=ev_result.declared_style,
+                status=ev_result.overall_status,
+                confidence=round(ev_result.confidence, 2),
+                evidence_count=len(ev_result.evidence_items),
+                violations=sum(1 for e in ev_result.evidence_items if e.status == "violation"),
+                compliant=sum(1 for e in ev_result.evidence_items if e.status == "compliant"),
+                summary=ev_result.summary,
+                findings=issue_by_category.get(ev_result.category, []),
+                evidence_summary=[
+                    {
+                        "status": e.status,
+                        "file": e.file,
+                        "line": e.line,
+                        "endpoint": e.endpoint,
+                        "service": e.service,
+                        "message": e.message,
+                        "confidence": round(e.confidence, 2),
+                    }
+                    for e in ev_result.evidence_items
+                ],
+            )
+            if ev_result.category == "folder_structure":
+                folder_structure_compliance = section
+            else:
+                standards_compliance_sections.append(section)
+
+        flow_issue_map = {
+            "authn_flow": "missing_auth",
+            "authz_flow": "missing_authz_flow",
+            "ownership_flow": "missing_ownership_check",
+            "request_validation_flow": "missing_validation",
+            "response_contract_flow": "missing_response_contract_flow",
+            "error_handling_flow": "missing_error_handling_flow",
+            "input_sanitization_flow": "missing_input_sanitization_flow",
+            "secret_pii_protection_flow": "missing_secret_pii_protection_flow",
+            "rate_limit_flow": "missing_rate_limit_flow",
+            "audit_trace_flow": "missing_audit_trace_flow",
+            "idempotency_tx_flow": "missing_idempotency_tx_flow",
+        }
+        for flow_item in mandatory_flow_result.flow_summary:
+            mapped_issue_type = flow_issue_map.get(flow_item.flow_id, flow_item.flow_id)
+            findings = [issue for issue in issues if issue.type == mapped_issue_type]
+            status = "compliant"
+            if flow_item.missing > 0:
+                status = "non_compliant"
+            elif flow_item.ambiguous > 0:
+                status = "partial"
+            total_checks = (
+                flow_item.covered
+                + flow_item.missing
+                + flow_item.ambiguous
+                + flow_item.not_applicable
+            )
+            confidence = (
+                flow_item.covered / max(flow_item.covered + flow_item.missing + flow_item.ambiguous, 1)
+            )
+            mandatory_compliance_sections.append(
+                StandardsComplianceSection(
+                    category=flow_item.flow_id,
+                    declared_style="mandatory_rule",
+                    status=status,
+                    confidence=round(confidence, 2),
+                    evidence_count=total_checks,
+                    violations=flow_item.missing,
+                    compliant=flow_item.covered,
+                    summary=flow_item.title,
+                    findings=findings,
+                    evidence_summary=[],
+                )
+            )
 
         report = AnalysisReport(
             summary=summary,
@@ -197,12 +437,64 @@ class ValidationOrchestrator:
             flow_summary=mandatory_flow_result.flow_summary,
             flow_coverage=mandatory_flow_result.flow_coverage,
             observations=mandatory_flow_result.observations,
+            standard_used=request.standard_id,
+            standards_compliance=standards_compliance_sections,
+            folder_structure_compliance=folder_structure_compliance,
+            mandatory_compliance=mandatory_compliance_sections,
+            coverage_matrix=coverage_matrix_data,
         )
 
         self._write_final_trace(job_id, report)
 
         await self._emit(progress_cb, "complete", "Analysis completed", payload={"summary": summary.model_dump()})
         return report
+
+    def _extract_standards_category(self, issue: Issue) -> str | None:
+        if not issue.type.startswith("standards_violation_"):
+            return None
+        stripped = issue.type.removeprefix("standards_violation_")
+        if not stripped:
+            return None
+        for part in [
+            "auth_style",
+            "auth_mechanism",
+            "authz_model",
+            "authz_enforcement",
+            "ownership_protection",
+            "request_validation",
+            "response_contract",
+            "error_handling",
+            "database_orm",
+            "persistence_pattern",
+            "logging_style",
+            "logging_library",
+            "rate_limiting",
+            "cors_config",
+            "cors_policy",
+            "api_architecture",
+            "api_versioning",
+            "config_management",
+            "migration_tool",
+            "di_style",
+            "architecture_pattern",
+            "input_sanitization",
+            "secret_management",
+            "idempotency",
+            "state_management",
+            "http_client",
+            "routing",
+            "auth_token_storage",
+            "form_handling",
+            "component_architecture",
+            "styling_approach",
+            "error_boundary",
+            "api_layer_pattern",
+            "env_config",
+            "folder_structure",
+        ]:
+            if stripped.startswith(part):
+                return part
+        return None
 
     def _merge_static_results(
         self,
@@ -448,7 +740,13 @@ class ValidationOrchestrator:
         })
 
     def _confidence_band(self, issue: Issue, provenance: list[str]) -> ConfidenceBand:
-        deterministic_sources = {"mandatory_flow", "contract_validator", "graph_matcher", "deterministic_rule_engine"}
+        deterministic_sources = {
+            "mandatory_flow",
+            "contract_validator",
+            "graph_matcher",
+            "deterministic_rule_engine",
+            "standards_engine",
+        }
         if any(source in provenance for source in deterministic_sources):
             return ConfidenceBand.DETERMINISTIC
         if len(set(provenance)) >= 2 or ("cross_reviewer" in provenance and issue.confidence >= 0.75):

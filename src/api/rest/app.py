@@ -13,6 +13,7 @@ from src.api.middleware.metrics import setup_metrics
 from src.api.rest.routes.analysis import router as analysis_router
 from src.api.rest.routes.health import router as health_router
 from src.api.rest.routes.sse import router as sse_router
+from src.api.rest.routes.standards import router as standards_router
 from src.api.rest.routes.websocket import router as websocket_router
 from src.config.settings import settings
 from src.observability.logging.setup import configure_logging
@@ -37,6 +38,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(analysis_router)
     app.include_router(sse_router)
+    app.include_router(standards_router)
     app.include_router(websocket_router)
 
     # Optional versioned aliases
@@ -45,6 +47,7 @@ def create_app() -> FastAPI:
         api_router.include_router(health_router)
         api_router.include_router(analysis_router)
         api_router.include_router(sse_router)
+        api_router.include_router(standards_router)
         api_router.include_router(websocket_router)
         app.include_router(api_router)
 

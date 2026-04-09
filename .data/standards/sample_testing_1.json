@@ -1,0 +1,77 @@
+{
+  "standard_id": "sample_testing_1",
+  "name": "Sample Testing - 1",
+  "description": "This is sample testing Standards..",
+  "version": 1,
+  "stacks": [
+    {
+      "stack_type": "fastapi",
+      "categories": {
+        "auth_style": "dependency_injection",
+        "auth_mechanism": "jwt_bearer",
+        "authz_model": "rbac",
+        "authz_enforcement": "dependency_injection",
+        "ownership_protection": "tenant_scoping",
+        "request_validation": "pydantic_models",
+        "response_contract": "response_model",
+        "error_handling": "per_route_try_except",
+        "database_orm": "sqlalchemy_async",
+        "persistence_pattern": "repository_pattern",
+        "logging_style": "middleware_logging",
+        "logging_library": "structlog",
+        "rate_limiting": "custom_middleware",
+        "cors_config": "fastapi_cors_middleware",
+        "cors_policy": "strict_origins",
+        "api_architecture": "rest",
+        "api_versioning": "url_prefix",
+        "config_management": "pydantic_settings",
+        "migration_tool": "raw_sql",
+        "di_style": "fastapi_depends",
+        "architecture_pattern": "layered_routes_services_repos",
+        "input_sanitization": "pydantic_validators",
+        "secret_management": "dotenv",
+        "idempotency": "none"
+      },
+      "folder_structure": {
+        "routes": "src/api/rest/routes",
+        "services": "src/core/services",
+        "repositories": "src/data/repositories",
+        "models": "src/data/models",
+        "schemas": "src/schemas",
+        "middleware": "src/api/middleware",
+        "config": "src/config",
+        "tests": "tests"
+      },
+      "custom_notes": []
+    },
+    {
+      "stack_type": "react",
+      "categories": {
+        "state_management": "redux_toolkit",
+        "http_client": "axios",
+        "routing": "react_router_v6",
+        "auth_token_storage": "httponly_cookie",
+        "form_handling": "native_state",
+        "component_architecture": "feature_based",
+        "styling_approach": "tailwind",
+        "error_boundary": "custom_error_boundary",
+        "api_layer_pattern": "rtk_query_slice",
+        "env_config": "vite_env"
+      },
+      "folder_structure": {
+        "components": "src/components",
+        "pages": "src/features/components",
+        "services": "src/features/services",
+        "hooks": "src/features/hooks",
+        "store": "src/store",
+        "types": "src/features/types",
+        "utils": "src/utils",
+        "assets": "src/assests"
+      },
+      "custom_notes": []
+    }
+  ],
+  "mandatory_rules_version": "mandatory_v1",
+  "created_at": "2026-04-08T10:07:06.187898Z",
+  "updated_at": "2026-04-08T10:07:06.187720Z"
+}

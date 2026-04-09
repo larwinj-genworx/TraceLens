@@ -59,6 +59,10 @@ class Settings(BaseModel):
     evidence_trace_dir: Path = Field(
         default_factory=lambda: PROJECT_ROOT / ".traces",
     )
+    strict_standards_mode: bool = Field(
+        default_factory=lambda: os.getenv("STRICT_STANDARDS_MODE", "true").lower() == "true",
+        description="Enable strict standards-driven checks and evidence-to-issue conversion.",
+    )
 
 
 settings = Settings()

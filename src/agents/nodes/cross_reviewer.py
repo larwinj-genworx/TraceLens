@@ -70,6 +70,7 @@ async def review_issues(state: AgentState) -> dict[str, Any]:
     evidence, removing false positives and adjusting confidence."""
     consolidated: list[Issue] = state.get("consolidated_issues", [])
     full_evidence: dict[str, Any] = state["evidence_package"]["full"]
+    standards_ctx: dict[str, Any] = state.get("standards_context", {})
     logger.info("cross_reviewer started candidates=%d", len(consolidated))
 
     if not consolidated:
@@ -80,12 +81,26 @@ async def review_issues(state: AgentState) -> dict[str, Any]:
     logger.info("cross_reviewer deterministic_keys=%d", len(det_keys))
 
     candidates_payload = _build_candidates_payload(consolidated, det_keys)
+    det_keys |= _build_standards_backed_keys(candidates_payload)
+    _tag_deterministic(candidates_payload, det_keys)
     evidence_summary = _compact_evidence_summary(full_evidence)
 
     if len(consolidated) > _BATCH_THRESHOLD:
-        reviewed = await _batched_review(candidates_payload, evidence_summary, det_keys, consolidated)
+        reviewed = await _batched_review(
+            candidates_payload,
+            evidence_summary,
+            det_keys,
+            consolidated,
+            standards_ctx,
+        )
     else:
-        reviewed = await _single_review(candidates_payload, evidence_summary, det_keys, consolidated)
+        reviewed = await _single_review(
+            candidates_payload,
+            evidence_summary,
+            det_keys,
+            consolidated,
+            standards_ctx,
+        )
 
     _log_review_delta(len(consolidated), len(reviewed))
     return {"reviewed_issues": reviewed}
@@ -121,6 +136,7 @@ async def _single_review(
     evidence_summary: dict[str, Any],
     det_keys: set[tuple[str, str | None]],
     original_consolidated: list[Issue],
+    standards_ctx: dict[str, Any],
 ) -> list[Issue]:
     """Review all candidates in a single LLM call."""
     candidates_text = json.dumps(candidates_payload, indent=None, default=str, ensure_ascii=False)
@@ -130,6 +146,9 @@ async def _single_review(
     evidence_text = json.dumps(evidence_summary, indent=None, default=str, ensure_ascii=False)
     if len(evidence_text) > _MAX_EVIDENCE_CHARS:
         evidence_text = evidence_text[:_MAX_EVIDENCE_CHARS] + " ..."
+    standards_text = json.dumps(standards_ctx, indent=None, default=str, ensure_ascii=False)
+    if len(standards_text) > 3000:
+        standards_text = standards_text[:3000] + " ..."
 
     logger.info(
         "cross_reviewer payload candidates_chars=%d evidence_chars=%d",
@@ -140,6 +159,8 @@ async def _single_review(
     user_content = (
         "CANDIDATE ISSUES:\n" + candidates_text
         + "\n\nEVIDENCE SUMMARY:\n" + evidence_text
+        + "\n\nSELECTED STANDARD CONTEXT:\n" + standards_text
+        + "\n\nRULE: Do not remove deterministic standards-backed violations unless contradictory evidence is explicit."
     )
 
     client = RateLimitedGroqClient(model=settings.groq_reviewer_model)
@@ -165,6 +186,7 @@ async def _batched_review(
     evidence_summary: dict[str, Any],
     det_keys: set[tuple[str, str | None]],
     original_consolidated: list[Issue],
+    standards_ctx: dict[str, Any],
 ) -> list[Issue]:
     """Split large candidate sets into batches and review each separately."""
     batches: list[list[dict[str, Any]]] = []
@@ -181,6 +203,9 @@ async def _batched_review(
     evidence_text = json.dumps(evidence_summary, indent=None, default=str, ensure_ascii=False)
     if len(evidence_text) > _MAX_EVIDENCE_CHARS:
         evidence_text = evidence_text[:_MAX_EVIDENCE_CHARS] + " ..."
+    standards_text = json.dumps(standards_ctx, indent=None, default=str, ensure_ascii=False)
+    if len(standards_text) > 3000:
+        standards_text = standards_text[:3000] + " ..."
 
     for batch_idx, batch in enumerate(batches):
         batch_text = json.dumps(batch, indent=None, default=str, ensure_ascii=False)
@@ -192,6 +217,8 @@ async def _batched_review(
         user_content = (
             f"CANDIDATE ISSUES (batch {batch_idx + 1}/{len(batches)}):\n" + batch_text
             + "\n\nEVIDENCE SUMMARY:\n" + evidence_text
+            + "\n\nSELECTED STANDARD CONTEXT:\n" + standards_text
+            + "\n\nRULE: Do not remove deterministic standards-backed violations unless contradictory evidence is explicit."
         )
 
         client = RateLimitedGroqClient(model=settings.groq_reviewer_model)
@@ -275,6 +302,23 @@ def _reinject_deterministic(
     if reinjected:
         logger.info("cross_reviewer re-injected %d deterministic issues", reinjected)
     return reviewed
+
+
+def _build_standards_backed_keys(
+    candidates_payload: list[dict[str, Any]],
+) -> set[tuple[str, str | None]]:
+    keys: set[tuple[str, str | None]] = set()
+    for candidate in candidates_payload:
+        issue_type = candidate.get("type", "")
+        endpoint = candidate.get("endpoint")
+        source = (candidate.get("source") or "").lower()
+        provenance = [str(item).lower() for item in candidate.get("provenance", [])]
+        if issue_type.startswith("standards_violation_"):
+            keys.add((issue_type, endpoint))
+            continue
+        if source == "standards_engine" or "standards_engine" in provenance:
+            keys.add((issue_type, endpoint))
+    return keys
 
 
 def _compact_evidence_summary(full: dict[str, Any]) -> dict[str, Any]:

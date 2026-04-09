@@ -132,6 +132,7 @@ async def run_analysis_graph(
     context: AnalysisContext,
     progress_cb: ProgressCallback | None = None,
     job_id: str | None = None,
+    standards_context: dict[str, Any] | None = None,
 ) -> tuple[list[Issue], list[str]]:
     """Execute the multi-agent analysis graph and return (issues, observations).
 
@@ -146,6 +147,7 @@ async def run_analysis_graph(
         "job_id": job_id,
         "analysis_context": context,
         "evidence_package": {},
+        "standards_context": standards_context or {},
         "security_issues": [],
         "integration_issues": [],
         "quality_issues": [],

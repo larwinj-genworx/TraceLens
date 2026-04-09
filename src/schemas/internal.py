@@ -3,7 +3,20 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
+from dataclasses import dataclass, field as dc_field
+
 from pydantic import BaseModel, Field
+
+
+@dataclass
+class ServiceCallSignals:
+    """Behavioral signals extracted from service-layer function calls."""
+
+    has_identity_comparison: bool = False
+    has_authorization_raise: bool = False
+    has_identity_filter: bool = False
+    identity_attrs_compared: list[str] = dc_field(default_factory=list)
+    traced_depth: int = 0
 
 
 class RepoType(str, Enum):
@@ -44,11 +57,23 @@ class BackendEndpoint(BaseModel):
     response_fields: list[SchemaField] = Field(default_factory=list)
     redacted_response_fields: list[str] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
+    dep_classifications: list[str] = Field(
+        default_factory=list,
+        description="Semantic classifications: auth:jwt_bearer, authz:rbac, etc.",
+    )
+    auth_mechanism_detected: str | None = Field(
+        default=None,
+        description="Detected auth mechanism: jwt_bearer, oauth2, session, api_key.",
+    )
     function_name: str | None = None
     decorators: list[str] = Field(default_factory=list)
     call_refs: list[str] = Field(default_factory=list)
     string_refs: list[str] = Field(default_factory=list)
     has_try_except: bool = False
+    expects_request_body: bool = True
+    returns_file_response: bool = False
+    status_code_literal: int | None = None
+    service_call_signals: ServiceCallSignals = Field(default_factory=ServiceCallSignals)
     route_intent: str | None = None
     auth_mode: str | None = None
     ownership_mode: str | None = None
@@ -79,12 +104,23 @@ class CorsConfig(BaseModel):
     is_permissive: bool = False
 
 
+class AuthMiddlewareAnalysisResult(BaseModel):
+    """Analysis of auth middleware behavior extracted via AST inspection."""
+
+    middleware_name: str = ""
+    mechanism: str = "unknown"  # "jwt_bearer", "session", "api_key"
+    public_paths: list[str] = Field(default_factory=list)
+    websocket_excluded: bool = False
+    sets_request_state: bool = False
+
+
 class FastAPIGlobalFacts(BaseModel):
     middleware_refs: list[str] = Field(default_factory=list)
     exception_handler_refs: list[str] = Field(default_factory=list)
     global_dependencies: list[str] = Field(default_factory=list)
     module_call_refs: list[str] = Field(default_factory=list)
     cors_config: CorsConfig | None = None
+    auth_middleware_analysis: AuthMiddlewareAnalysisResult | None = None
 
 
 class ClientStorageIssue(BaseModel):
