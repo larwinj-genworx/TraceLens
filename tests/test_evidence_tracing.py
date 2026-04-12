@@ -93,13 +93,14 @@ class TestWriteTrace:
             assert isinstance(content["data"], list)
 
     def test_trace_file_count(self):
-        assert len(_TRACE_NODE_FILES) == 7
+        assert len(_TRACE_NODE_FILES) == 8
         expected_files = {
             "01_evidence_package.json",
             "02_security_issues.json",
             "03_integration_issues.json",
             "04_quality_issues.json",
             "05_consolidated_issues.json",
+            "05b_filtered_issues.json",
             "06_reviewed_issues.json",
             "07_final_report.json",
         }

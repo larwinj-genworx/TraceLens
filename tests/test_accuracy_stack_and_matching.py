@@ -5,12 +5,14 @@ import unittest
 from pathlib import Path
 
 from src.schemas.internal import (
+    AuthMiddlewareAnalysisResult,
     BackendEndpoint,
     FastAPIGlobalFacts,
     FrontendCall,
     StaticAnalysisResult,
 )
 from src.standards.coverage_tracker import EndpointCoverageTracker
+from src.standards.evidence_collectors.auth_evidence import collect_auth_evidence
 from src.standards.evidence_collectors.backend_evidence import (
     collect_response_contract_evidence,
     collect_validation_evidence,
@@ -18,8 +20,9 @@ from src.standards.evidence_collectors.backend_evidence import (
 from src.standards.evidence_collectors.generic_evidence import (
     RepoCodeIndex,
     collect_generic_fastapi_category,
+    detect_conflicting_style,
 )
-from src.standards.resolver import CategoryResolution, ResolvedStandard
+from src.standards.resolver import CategoryResolution, ResolvedStandard, StackResolution
 from src.utils.canonicalization import canonicalize_frontend_url_path, classify_auth_mode
 
 
@@ -191,6 +194,155 @@ class AccuracyStackAndMatchingTest(unittest.TestCase):
 
         self.assertEqual(validation.overall_status, "compliant")
         self.assertEqual(contracts.overall_status, "compliant")
+
+
+    def test_di_auth_violation_when_middleware_does_real_auth(self) -> None:
+        """When standard says dependency_injection but repo has JWT middleware,
+        all protected endpoints must be flagged as violations."""
+        resolved = ResolvedStandard(standard_id="std", name="Standard")
+        resolved.fastapi = StackResolution(stack_type="fastapi")
+        resolved.fastapi.categories["auth_style"] = CategoryResolution(
+            category_id="auth_style",
+            selected_style="dependency_injection",
+            check_strategy="dep_injection_auth",
+            evidence_markers=["Depends(", "get_current_user", "Security("],
+        )
+
+        mw_analysis = AuthMiddlewareAnalysisResult(
+            middleware_name="JWTMiddleware",
+            mechanism="jwt_bearer",
+            public_paths=["/health", "/docs"],
+            sets_request_state=True,
+        )
+        facts = FastAPIGlobalFacts(
+            middleware_refs=["JWTMiddleware"],
+            auth_middleware_analysis=mw_analysis,
+        )
+        endpoints = [
+            BackendEndpoint(
+                service="ticket_svc",
+                file="src/api/rest/routes/tickets.py",
+                line=42,
+                path="/tickets",
+                method="GET",
+                dependencies=["user_id:get_current_user_id"],
+            ),
+            BackendEndpoint(
+                service="ticket_svc",
+                file="src/api/rest/routes/tickets.py",
+                line=80,
+                path="/tickets/{ticket_id}",
+                method="PUT",
+                dependencies=["user_id:get_current_user_id", "role:get_current_user_role"],
+            ),
+        ]
+        static = StaticAnalysisResult(
+            repo="ticket_svc",
+            backend_endpoints=endpoints,
+            fastapi_facts=facts,
+        )
+
+        result = collect_auth_evidence(resolved, {"ticket_svc": static})
+
+        violations = [e for e in result.evidence_items if e.status == "violation"]
+        compliant = [e for e in result.evidence_items if e.status == "compliant"]
+        self.assertGreater(len(violations), 0, "Middleware-based auth should violate DI standard")
+        self.assertEqual(len(compliant), 0, "No endpoints should be compliant")
+        self.assertTrue(
+            any("middleware" in v.message.lower() for v in violations),
+            "Violation message should mention middleware",
+        )
+
+    def test_di_auth_pass_when_no_middleware_and_real_di(self) -> None:
+        """When standard says dependency_injection and repo has no middleware,
+        endpoints with HTTPBearer/Security deps should be compliant."""
+        resolved = ResolvedStandard(standard_id="std", name="Standard")
+        resolved.fastapi = StackResolution(stack_type="fastapi")
+        resolved.fastapi.categories["auth_style"] = CategoryResolution(
+            category_id="auth_style",
+            selected_style="dependency_injection",
+            check_strategy="dep_injection_auth",
+            evidence_markers=["Depends(", "get_current_user", "Security("],
+        )
+
+        facts = FastAPIGlobalFacts(middleware_refs=[])
+        endpoints = [
+            BackendEndpoint(
+                service="auth_svc",
+                file="src/api/rest/routes/auth.py",
+                line=30,
+                path="/me",
+                method="GET",
+                dependencies=["current_user:get_current_active_user"],
+                dep_classifications=["auth:jwt_bearer"],
+            ),
+        ]
+        static = StaticAnalysisResult(
+            repo="auth_svc",
+            backend_endpoints=endpoints,
+            fastapi_facts=facts,
+        )
+
+        result = collect_auth_evidence(resolved, {"auth_svc": static})
+
+        compliant = [e for e in result.evidence_items if e.status == "compliant"]
+        self.assertGreater(len(compliant), 0, "Real DI auth should be compliant")
+
+    def test_conflict_detection_finds_conflicting_style(self) -> None:
+        """detect_conflicting_style should find markers from non-selected options."""
+        category = CategoryResolution(
+            category_id="auth_style",
+            selected_style="dependency_injection",
+            check_strategy="dep_injection_auth",
+            evidence_markers=["Depends(", "get_current_user"],
+            other_options={
+                "global_middleware": ["add_middleware", "JWTMiddleware", "AuthMiddleware"],
+                "decorator": ["@require_auth", "@login_required"],
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "src" / "api").mkdir(parents=True, exist_ok=True)
+            (root / "src" / "api" / "app.py").write_text(
+                "from fastapi import FastAPI\n"
+                "app = FastAPI()\n"
+                "app.add_middleware(JWTMiddleware)\n",
+                encoding="utf-8",
+            )
+            repo_index = RepoCodeIndex({"svc": tmpdir})
+            result = detect_conflicting_style(category, repo_index, "svc", "fastapi")
+
+        self.assertIsNotNone(result, "Should detect conflicting middleware markers")
+        style, hits = result
+        self.assertEqual(style, "global_middleware")
+        self.assertTrue(any("JWTMiddleware" in h.marker for h in hits))
+
+    def test_no_conflict_when_selected_style_is_correct(self) -> None:
+        """detect_conflicting_style should return None when no other style markers found."""
+        category = CategoryResolution(
+            category_id="auth_style",
+            selected_style="global_middleware",
+            check_strategy="middleware_auth",
+            evidence_markers=["add_middleware", "JWTMiddleware"],
+            other_options={
+                "dependency_injection": ["HTTPBearer", "Security(", "oauth2_scheme"],
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "src" / "api").mkdir(parents=True, exist_ok=True)
+            (root / "src" / "api" / "app.py").write_text(
+                "from fastapi import FastAPI\n"
+                "app = FastAPI()\n"
+                "app.add_middleware(JWTMiddleware)\n",
+                encoding="utf-8",
+            )
+            repo_index = RepoCodeIndex({"svc": tmpdir})
+            result = detect_conflicting_style(category, repo_index, "svc", "fastapi")
+
+        self.assertIsNone(result, "No conflict when project matches selected style")
 
 
 if __name__ == "__main__":
