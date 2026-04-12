@@ -32,6 +32,12 @@ class CategoryResolution:
     label: str = ""
     all_option_markers: list[str] = field(default_factory=list)
     required: bool = False
+    other_options: dict[str, list[str]] = field(default_factory=dict)
+    """Maps non-selected option values to their evidence_markers.
+
+    Used by conflict detection: if markers from an *other* option are found
+    in the codebase, the project likely uses a different style than declared.
+    """
 
 
 @dataclass
@@ -215,7 +221,14 @@ class StandardsResolver:
             for cat_id, selected_value in stack_config.categories.items():
                 if not selected_value:
                     continue
-                opt_data = option_index.get(cat_id, {}).get(selected_value)
+                cat_options = option_index.get(cat_id, {})
+                opt_data = cat_options.get(selected_value)
+
+                other_opts: dict[str, list[str]] = {}
+                for ovalue, odata in cat_options.items():
+                    if ovalue != selected_value:
+                        other_opts[ovalue] = odata.get("evidence_markers", [])
+
                 if opt_data is None:
                     logger.warning(
                         "Unknown option %r for category %r in stack %r",
@@ -232,6 +245,7 @@ class StandardsResolver:
                             "all_option_markers", []
                         ),
                         required=bool(category_meta.get(cat_id, {}).get("required", False)),
+                        other_options=other_opts,
                     )
                     continue
 
@@ -245,6 +259,7 @@ class StandardsResolver:
                         "all_option_markers", []
                     ),
                     required=bool(category_meta.get(cat_id, {}).get("required", False)),
+                    other_options=other_opts,
                 )
 
             stack_resolution.folder_expectations = dict(

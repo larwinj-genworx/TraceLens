@@ -495,6 +495,44 @@ def _collect_generic_category(
                     )
                 )
 
+    # --- Conflict detection: check if a DIFFERENT style is actually in use ---
+    if not expect_absence and category.other_options:
+        compliant_count = sum(
+            1 for ev in result.evidence_items if ev.status == "compliant"
+        )
+        for service in static_results.keys():
+            conflict = detect_conflicting_style(
+                category, repo_index, service, stack,
+            )
+            if conflict is None:
+                continue
+            conflicting_style, conflict_hits = conflict
+            if not conflict_hits:
+                continue
+            # If we found more conflicting-style evidence than compliant evidence,
+            # the project likely uses a different style than declared.
+            if len(conflict_hits) >= max(1, compliant_count // 3):
+                for hit in conflict_hits[:5]:
+                    result.add(Evidence(
+                        category=category_id,
+                        style=style,
+                        status="violation",
+                        file=hit.file,
+                        line=hit.line,
+                        service=service,
+                        confidence=0.88,
+                        message=(
+                            f"Conflicting style detected: project uses "
+                            f"'{conflicting_style}' instead of declared '{style}' "
+                            f"(found marker '{hit.marker}')."
+                        ),
+                        details={
+                            "actual_style": conflicting_style,
+                            "marker": hit.marker,
+                            "excerpt": hit.excerpt,
+                        },
+                    ))
+
     result.compute_status()
     return result
 
@@ -621,4 +659,39 @@ def _is_public_auth_path(path: str) -> bool:
     if normalized in _PUBLIC_AUTH_PATHS:
         return True
     return normalized.startswith(("/health", "/docs", "/openapi", "/metrics"))
+
+
+def detect_conflicting_style(
+    category: CategoryResolution,
+    repo_index: RepoCodeIndex,
+    service: str,
+    stack: str,
+) -> tuple[str, list[MarkerHit]] | None:
+    """Check if markers from a non-selected style option are present in the repo.
+
+    Returns (conflicting_style_value, hits) if a conflict is detected,
+    or None if no conflict is found.
+    """
+    if not category.other_options:
+        return None
+
+    selected_markers_set = frozenset(m.lower() for m in category.evidence_markers)
+    best: tuple[str, list[MarkerHit]] | None = None
+    best_count = 0
+
+    for other_value, other_markers in category.other_options.items():
+        if not other_markers:
+            continue
+        unique_other = [
+            m for m in other_markers
+            if m.lower() not in selected_markers_set
+        ]
+        if not unique_other:
+            continue
+        hits = repo_index.marker_hits(service, stack, unique_other)
+        if len(hits) > best_count:
+            best = (other_value, hits)
+            best_count = len(hits)
+
+    return best
 

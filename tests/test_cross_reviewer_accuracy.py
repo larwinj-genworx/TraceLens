@@ -58,6 +58,7 @@ def _make_flow_coverage(flow_id: str, endpoint: str, status: FlowStatus) -> dict
         "ep": endpoint,
         "svc": "backend",
         "status": status.value,
+        "confidence": 0.9,
     }
 
 

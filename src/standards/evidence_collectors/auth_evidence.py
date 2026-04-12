@@ -49,6 +49,37 @@ def _has_any_marker(text_sources: list[str], markers: list[str]) -> bool:
     return False
 
 
+_AUTH_DI_INDICATORS = frozenset({
+    "httpbearer", "httpauthorizationcredentials", "oauth2passwordbearer",
+    "oauth2authorizationcodebearer", "security(", "securityscopes",
+    "jwt.decode", "decode_token", "verify_token", "validate_token",
+    "apikeycookie", "apikeyheader", "apikeyquery",
+})
+
+_STATE_READER_INDICATORS = frozenset({
+    "request.state.", "request.state",
+})
+
+
+def _uses_auth_dependency_injection(endpoint: BackendEndpoint) -> bool:
+    """Check if the endpoint uses DI that actually performs token validation.
+
+    Returns False for deps that only read request.state (middleware-set data)
+    or that merely propagate identity without performing JWT/token verification.
+    """
+    if not endpoint.dependencies:
+        return False
+
+    dep_tokens = endpoint.dependencies + endpoint.call_refs + endpoint.decorators
+    joined = " ".join(dep_tokens).lower()
+
+    for indicator in _AUTH_DI_INDICATORS:
+        if indicator in joined:
+            return True
+
+    return False
+
+
 def _uses_dependency_injection(endpoint: BackendEndpoint) -> bool:
     if endpoint.dependencies:
         return True
@@ -82,8 +113,13 @@ def collect_auth_evidence(
         facts = static.fastapi_facts
 
         if strategy == "middleware_auth":
+            mw_analysis = facts.auth_middleware_analysis
             middleware_found = _has_any_marker(facts.middleware_refs, markers)
-            if middleware_found:
+            has_real_middleware = bool(
+                mw_analysis and mw_analysis.mechanism != "unknown"
+            ) or middleware_found
+
+            if has_real_middleware:
                 for ep in static.backend_endpoints:
                     if _is_public_path(ep.path):
                         continue
@@ -100,76 +136,46 @@ def collect_auth_evidence(
                         details={"middleware_refs": facts.middleware_refs},
                     ))
             else:
+                # Check if repo uses DI auth instead (conflicting style)
+                di_detected = any(
+                    _uses_auth_dependency_injection(ep)
+                    for ep in static.backend_endpoints
+                    if not _is_public_path(ep.path)
+                )
+                detail_msg = (
+                    "Declared middleware auth but project uses dependency injection auth instead."
+                    if di_detected
+                    else "Declared middleware auth but no matching middleware registration found."
+                )
                 result.add(Evidence(
                     category="auth_style",
                     style=style,
                     status="violation",
                     service=repo_name,
-                    confidence=0.85,
-                    message="Declared middleware auth but no matching middleware registration found.",
-                    details={"middleware_refs": facts.middleware_refs, "expected_markers": markers},
+                    confidence=0.88 if di_detected else 0.85,
+                    message=detail_msg,
+                    details={
+                        "middleware_refs": facts.middleware_refs,
+                        "expected_markers": markers,
+                        **({"actual_style": "dependency_injection"} if di_detected else {}),
+                    },
                 ))
 
         elif strategy == "dep_injection_auth":
-            # Detect if repo also has auth middleware (hybrid pattern)
             mw_analysis = facts.auth_middleware_analysis
             has_auth_middleware = bool(
                 mw_analysis and mw_analysis.mechanism != "unknown"
             )
 
-            for ep in static.backend_endpoints:
-                if _is_public_path(ep.path):
-                    continue
-                if ep.route_intent in ("public_meta", "auth_entry"):
-                    continue
-
-                text_pool = ep.dependencies + ep.call_refs + ep.decorators
-                has_di = _has_any_marker(text_pool, markers) or _uses_dependency_injection(ep)
-
-                # Also accept AST-classified auth dependencies
-                has_semantic_auth = any(
-                    dc.startswith("auth") for dc in ep.dep_classifications
-                )
-
-                # Hybrid: middleware covers auth even without per-route DI
-                mw_covers = False
-                if has_auth_middleware and not has_di and not has_semantic_auth:
-                    ep_path_lower = ep.path.lower()
-                    excluded = False
-                    if mw_analysis and mw_analysis.public_paths:
-                        for pub in mw_analysis.public_paths:
-                            if pub.lower() in ep_path_lower:
-                                excluded = True
-                                break
-                    if not excluded:
-                        mw_covers = True
-
-                if has_di or has_semantic_auth:
-                    result.add(Evidence(
-                        category="auth_style",
-                        style=style,
-                        status="compliant",
-                        file=ep.file,
-                        line=ep.line,
-                        endpoint=_endpoint_key(ep),
-                        service=repo_name,
-                        confidence=0.93,
-                        message=f"Auth dependency found on {_endpoint_key(ep)}",
-                    ))
-                elif mw_covers:
-                    result.add(Evidence(
-                        category="auth_style",
-                        style=style,
-                        status="compliant",
-                        file=ep.file,
-                        line=ep.line,
-                        endpoint=_endpoint_key(ep),
-                        service=repo_name,
-                        confidence=0.88,
-                        message=f"Auth middleware covers {_endpoint_key(ep)} (hybrid DI+middleware pattern)",
-                        details={"middleware": mw_analysis.middleware_name if mw_analysis else ""},
-                    ))
-                else:
+            if has_auth_middleware:
+                # Auth middleware handles token validation for this repo.
+                # Any Depends(get_current_user…) merely reads request.state
+                # set by the middleware — that is middleware auth, not DI auth.
+                for ep in static.backend_endpoints:
+                    if _is_public_path(ep.path):
+                        continue
+                    if ep.route_intent in ("public_meta", "auth_entry"):
+                        continue
                     result.add(Evidence(
                         category="auth_style",
                         style=style,
@@ -178,10 +184,59 @@ def collect_auth_evidence(
                         line=ep.line,
                         endpoint=_endpoint_key(ep),
                         service=repo_name,
-                        confidence=0.88,
-                        message=f"No auth dependency on protected endpoint {_endpoint_key(ep)}",
-                        details={"deps": ep.dependencies, "expected_markers": markers},
+                        confidence=0.92,
+                        message=(
+                            f"Authentication on {_endpoint_key(ep)} is handled by "
+                            f"middleware ({mw_analysis.middleware_name or 'detected'}), "
+                            f"not dependency injection. Standard requires dependency_injection."
+                        ),
+                        details={
+                            "actual_style": "global_middleware",
+                            "middleware": mw_analysis.middleware_name if mw_analysis else "",
+                        },
                     ))
+            else:
+                # No auth middleware — check if DI chain performs real auth.
+                for ep in static.backend_endpoints:
+                    if _is_public_path(ep.path):
+                        continue
+                    if ep.route_intent in ("public_meta", "auth_entry"):
+                        continue
+
+                    text_pool = ep.dependencies + ep.call_refs + ep.decorators
+                    has_di = (
+                        _uses_auth_dependency_injection(ep)
+                        or _has_any_marker(text_pool, markers)
+                    )
+                    has_semantic_auth = any(
+                        dc.startswith("auth") for dc in ep.dep_classifications
+                    )
+
+                    if has_di or has_semantic_auth:
+                        result.add(Evidence(
+                            category="auth_style",
+                            style=style,
+                            status="compliant",
+                            file=ep.file,
+                            line=ep.line,
+                            endpoint=_endpoint_key(ep),
+                            service=repo_name,
+                            confidence=0.93,
+                            message=f"Auth dependency injection found on {_endpoint_key(ep)}",
+                        ))
+                    else:
+                        result.add(Evidence(
+                            category="auth_style",
+                            style=style,
+                            status="violation",
+                            file=ep.file,
+                            line=ep.line,
+                            endpoint=_endpoint_key(ep),
+                            service=repo_name,
+                            confidence=0.88,
+                            message=f"No auth dependency on protected endpoint {_endpoint_key(ep)}",
+                            details={"deps": ep.dependencies, "expected_markers": markers},
+                        ))
 
         elif strategy == "decorator_auth":
             for ep in static.backend_endpoints:

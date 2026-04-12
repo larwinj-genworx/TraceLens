@@ -155,7 +155,7 @@ class ValidationOrchestrator:
                 timeout_seconds=request.runtime_timeout_seconds,
                 progress_cb=runtime_progress,
             )
-
+        
         await self._emit(progress_cb, "data_flow", "Performing end-to-end data flow validation")
         contract_issues.extend(self._validate_data_flow(graph_result, runtime_result))
 
@@ -843,6 +843,7 @@ class ValidationOrchestrator:
 
         result = callback(event)
         if inspect.isawaitable(result):
+            logger.info("orchestrator emitting event stage=%s message=%s payload=%s", stage, message, payload)
             await result
 
     def _path(self, value: str) -> Path:
