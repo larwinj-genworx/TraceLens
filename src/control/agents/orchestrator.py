@@ -138,6 +138,7 @@ class ValidationOrchestrator:
 
         await self._emit(progress_cb, "contracts", "Executing deterministic contract validation")
         contract_issues = self.contract_validator.validate(graph_result.matches)
+        contract_issues.extend(self.contract_validator.validate_dto_enforcement(static_results))
 
         runtime_result: RuntimeExecutionResult | None = None
         if request.enable_runtime:
@@ -787,6 +788,9 @@ class ValidationOrchestrator:
                 "response_field_not_consumed",
                 "response_type_mismatch",
                 "no_response_schema",
+                "direct_orm_response",
+                "orm_field_exposure",
+                "missing_dto_layer",
             }:
                 provenance.append("contract_validator")
             if issue.type in {"broken_service_connection", "data_flow_break", "data_loss"}:

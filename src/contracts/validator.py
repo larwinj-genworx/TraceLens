@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import re
+
 from src.constants.defaults import is_sensitive_field_name
-from src.schemas.internal import ServiceMatch
+from src.schemas.internal import ServiceMatch, StaticAnalysisResult
 
 
 class ContractValidator:
@@ -327,3 +329,184 @@ class ContractValidator:
 
     def _is_sensitive(self, field_name: str) -> bool:
         return is_sensitive_field_name(field_name)
+
+    # ── DTO enforcement validation ──────────────────────────────────────────
+
+    _ORM_QUERY_PATTERNS: frozenset[str] = frozenset({
+        "db.query", "session.query", "session.execute", "session.scalars",
+        "session.get", "select", "insert", "update", "delete",
+    })
+
+    _ORM_QUERY_TERMINATORS: frozenset[str] = frozenset({
+        "filter", "filter_by", "get", "get_or_none", "all", "first",
+        "one", "one_or_none", "scalar", "scalars",
+    })
+
+    _DTO_SUFFIXES = re.compile(
+        r"(Response|Out|Schema|DTO|Read|Public|View|Detail|List|Create|Update)$"
+    )
+
+    def validate_dto_enforcement(
+        self, static_results: dict[str, StaticAnalysisResult],
+    ) -> list[dict]:
+        issues: list[dict] = []
+
+        for static in static_results.values():
+            orm_registry = static.orm_model_registry
+            if not orm_registry:
+                continue
+
+            for endpoint in static.backend_endpoints:
+                if endpoint.is_websocket:
+                    continue
+
+                # --- direct_orm_response ---
+                if endpoint.orm_model_used:
+                    orm_name = endpoint.orm_model_used
+                    orm_cols = orm_registry.get(orm_name, [])
+                    issues.append(
+                        {
+                            "type": "direct_orm_response",
+                            "severity": "critical",
+                            "service": endpoint.service,
+                            "endpoint": f"{endpoint.method} {endpoint.path}",
+                            "file": endpoint.file,
+                            "line": endpoint.line,
+                            "description": (
+                                f"Endpoint uses ORM database model `{orm_name}` directly "
+                                f"as response_model instead of a Pydantic DTO schema."
+                            ),
+                            "evidence": {
+                                "orm_model": orm_name,
+                                "response_schema": endpoint.response_schema,
+                                "orm_columns": sorted(orm_cols),
+                            },
+                            "impact": (
+                                "Internal database structure, sensitive columns, and "
+                                "implementation details are exposed directly to API consumers."
+                            ),
+                            "fix": (
+                                f"Create a dedicated Pydantic response schema (e.g. "
+                                f"`{orm_name}Response`) with only the fields clients need."
+                            ),
+                            "confidence": 0.92,
+                        }
+                    )
+                    continue
+
+                # --- orm_field_exposure ---
+                if (
+                    endpoint.response_schema
+                    and endpoint.response_fields
+                    and not endpoint.orm_model_used
+                ):
+                    matching_orm = self._find_matching_orm_model(
+                        endpoint.response_schema, orm_registry,
+                    )
+                    if matching_orm:
+                        orm_name, orm_cols = matching_orm
+                        if orm_cols:
+                            dto_field_names = {f.name for f in endpoint.response_fields}
+                            exposed = [c for c in orm_cols if c in dto_field_names]
+                            if len(exposed) == len(orm_cols) and len(orm_cols) >= 3:
+                                issues.append(
+                                    {
+                                        "type": "orm_field_exposure",
+                                        "severity": "high",
+                                        "service": endpoint.service,
+                                        "endpoint": f"{endpoint.method} {endpoint.path}",
+                                        "file": endpoint.file,
+                                        "line": endpoint.line,
+                                        "description": (
+                                            f"Response DTO `{endpoint.response_schema}` exposes "
+                                            f"all {len(orm_cols)} columns from ORM model "
+                                            f"`{orm_name}` without filtering; acts as a "
+                                            f"pass-through of database structure."
+                                        ),
+                                        "evidence": {
+                                            "dto_schema": endpoint.response_schema,
+                                            "orm_model": orm_name,
+                                            "exposed_columns": sorted(exposed),
+                                            "dto_field_count": len(dto_field_names),
+                                            "orm_column_count": len(orm_cols),
+                                        },
+                                        "impact": (
+                                            "The DTO mirrors the database schema exactly, "
+                                            "defeating the purpose of a data transfer layer "
+                                            "and risking exposure of internal columns."
+                                        ),
+                                        "fix": (
+                                            f"Remove internal/sensitive columns from "
+                                            f"`{endpoint.response_schema}` that clients don't need."
+                                        ),
+                                        "confidence": 0.80,
+                                    }
+                                )
+
+                # --- missing_dto_layer ---
+                if (
+                    not endpoint.response_schema
+                    and not endpoint.returns_file_response
+                    and endpoint.status_code_literal != 204
+                    and endpoint.method.upper() != "HEAD"
+                    and self._has_orm_query_refs(endpoint.call_refs)
+                ):
+                    issues.append(
+                        {
+                            "type": "missing_dto_layer",
+                            "severity": "high",
+                            "service": endpoint.service,
+                            "endpoint": f"{endpoint.method} {endpoint.path}",
+                            "file": endpoint.file,
+                            "line": endpoint.line,
+                            "description": (
+                                "Endpoint performs database queries but has no response_model, "
+                                "returning raw ORM objects without serialization control."
+                            ),
+                            "evidence": {
+                                "orm_query_refs": [
+                                    r for r in endpoint.call_refs
+                                    if self._is_orm_query_ref(r)
+                                ][:10],
+                                "response_schema": None,
+                            },
+                            "impact": (
+                                "Without a response_model, FastAPI cannot filter or validate "
+                                "outbound data, risking exposure of all model attributes "
+                                "including sensitive or internal fields."
+                            ),
+                            "fix": (
+                                "Define a Pydantic response schema with only the fields "
+                                "clients need and set it as response_model on the decorator."
+                            ),
+                            "confidence": 0.78,
+                        }
+                    )
+
+        return issues
+
+    def _has_orm_query_refs(self, call_refs: list[str]) -> bool:
+        for ref in call_refs:
+            if self._is_orm_query_ref(ref):
+                return True
+        return False
+
+    def _is_orm_query_ref(self, ref: str) -> bool:
+        lowered = ref.lower()
+        if any(p in lowered for p in self._ORM_QUERY_PATTERNS):
+            return True
+        short = ref.split(".")[-1]
+        if short in self._ORM_QUERY_TERMINATORS:
+            return True
+        return False
+
+    def _find_matching_orm_model(
+        self, dto_name: str, orm_registry: dict[str, list[str]],
+    ) -> tuple[str, list[str]] | None:
+        base = self._DTO_SUFFIXES.sub("", dto_name)
+        if not base:
+            return None
+        for orm_name, cols in orm_registry.items():
+            if orm_name == base:
+                return orm_name, cols
+        return None

@@ -106,6 +106,7 @@ class FastAPIParser:
 
         # ── Phase 1b: build cross-file context ─────────────────────────────
         global_models = self._build_global_pydantic_models(file_asts)
+        orm_models = self._build_global_orm_models(file_asts)
         annotated_deps_map = self._build_annotated_type_alias_map(file_asts)
         module_to_file = self._build_module_to_file_map(repo_path)
         cross_file_info = self._build_cross_file_router_info(file_asts, module_to_file)
@@ -158,6 +159,13 @@ class FastAPIParser:
             if handler_node is not None:
                 ep.service_call_signals = call_tracer.trace_handler_calls(handler_node)
 
+        # ── Phase 1e: detect ORM model used as response_model ────────────
+        for ep in endpoints:
+            if ep.response_schema:
+                response_base = self._base_model_name(ep.response_schema)
+                if response_base in orm_models:
+                    ep.orm_model_used = response_base
+
         # Analyze middleware for auth behaviour
         auth_mw_analysis: AuthMiddlewareAnalysisResult | None = None
         mw_analysis_raw = dep_analyzer.analyze_middleware(sorted(middleware_refs))
@@ -185,6 +193,7 @@ class FastAPIParser:
                 cors_config=merged_cors_config,
                 auth_middleware_analysis=auth_mw_analysis,
             ),
+            orm_model_registry=orm_models,
         )
         return result, file_asts
 
@@ -1116,6 +1125,106 @@ class FastAPIParser:
             if base_name.endswith("BaseModel"):
                 return True
         return False
+
+    _ORM_COLUMN_CALL_NAMES: frozenset[str] = frozenset({
+        "Column", "mapped_column", "column_property",
+        "CharField", "IntField", "TextField", "BooleanField",
+        "FloatField", "DecimalField", "DatetimeField", "DateField",
+        "ForeignKeyField", "ManyToManyField", "OneToOneField",
+        "JSONField", "BinaryField", "UUIDField", "BigIntField",
+        "SmallIntField", "IntegerField", "BoolField",
+    })
+
+    def _is_orm_model_class(self, class_def: ast.ClassDef) -> bool:
+        for base in class_def.bases:
+            name = self._resolve_name(base)
+            if name.endswith("BaseModel") or name.endswith("BaseSettings"):
+                return False
+
+        has_tablename = self._class_has_tablename(class_def)
+        has_orm_cols = self._has_orm_column_definitions(class_def)
+
+        for base in class_def.bases:
+            name = self._resolve_name(base)
+            short = name.split(".")[-1]
+
+            if short in {"DeclarativeBase", "MappedAsDataclass"}:
+                return True
+            if short == "Base" and (has_tablename or has_orm_cols):
+                return True
+            if name == "db.Model":
+                return True
+            if short == "Model" and (has_tablename or has_orm_cols):
+                return True
+
+        return False
+
+    def _class_has_tablename(self, class_def: ast.ClassDef) -> bool:
+        for child in class_def.body:
+            if not isinstance(child, ast.Assign):
+                continue
+            for target in child.targets:
+                if isinstance(target, ast.Name) and target.id == "__tablename__":
+                    return True
+        return False
+
+    def _has_orm_column_definitions(self, class_def: ast.ClassDef) -> bool:
+        for child in class_def.body:
+            if isinstance(child, ast.Assign) and isinstance(child.value, ast.Call):
+                call_name = self._resolve_name(child.value.func).split(".")[-1]
+                if call_name in self._ORM_COLUMN_CALL_NAMES:
+                    return True
+            if isinstance(child, ast.AnnAssign) and child.value is not None:
+                if isinstance(child.value, ast.Call):
+                    call_name = self._resolve_name(child.value.func).split(".")[-1]
+                    if call_name in self._ORM_COLUMN_CALL_NAMES:
+                        return True
+                if child.annotation:
+                    ann = self._annotation_to_str(child.annotation)
+                    if "Mapped" in ann:
+                        return True
+        return False
+
+    def _extract_orm_columns(self, class_def: ast.ClassDef) -> list[str]:
+        columns: list[str] = []
+        for child in class_def.body:
+            if isinstance(child, ast.Assign):
+                for target in child.targets:
+                    if not isinstance(target, ast.Name) or target.id.startswith("_"):
+                        continue
+                    if isinstance(child.value, ast.Call):
+                        call_name = self._resolve_name(child.value.func).split(".")[-1]
+                        if call_name in self._ORM_COLUMN_CALL_NAMES:
+                            columns.append(target.id)
+            elif isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name):
+                name = child.target.id
+                if name.startswith("_"):
+                    continue
+                if child.value is not None and isinstance(child.value, ast.Call):
+                    call_name = self._resolve_name(child.value.func).split(".")[-1]
+                    if call_name in self._ORM_COLUMN_CALL_NAMES:
+                        columns.append(name)
+                        continue
+                if child.annotation:
+                    ann = self._annotation_to_str(child.annotation)
+                    if "Mapped" in ann:
+                        columns.append(name)
+        return columns
+
+    def _build_global_orm_models(
+        self,
+        file_asts: dict[str, tuple[Path, ast.Module]],
+    ) -> dict[str, list[str]]:
+        """Build a repo-wide name -> column-names map for every ORM model class."""
+        models: dict[str, list[str]] = {}
+        for _file_str, (_, tree) in file_asts.items():
+            for node in tree.body:
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                if not self._is_orm_model_class(node):
+                    continue
+                models[node.name] = self._extract_orm_columns(node)
+        return models
 
     def _annotation_to_str(self, node: ast.AST) -> str:
         if isinstance(node, ast.Name):
