@@ -77,6 +77,7 @@ class BackendEndpoint(BaseModel):
     route_intent: str | None = None
     auth_mode: str | None = None
     ownership_mode: str | None = None
+    orm_model_used: str | None = None
 
 
 class FrontendCall(BaseModel):
@@ -143,6 +144,7 @@ class StaticAnalysisResult(BaseModel):
     parser_errors: list[str] = Field(default_factory=list)
     fastapi_facts: FastAPIGlobalFacts = Field(default_factory=FastAPIGlobalFacts)
     client_storage_issues: list[ClientStorageIssue] = Field(default_factory=list)
+    orm_model_registry: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class FlowStatus(str, Enum):
