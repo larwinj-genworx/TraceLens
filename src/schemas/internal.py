@@ -94,6 +94,8 @@ class FrontendCall(BaseModel):
     url_unresolved: bool = False
     headers: dict[str, str] = Field(default_factory=dict)
     env_vars: list[str] = Field(default_factory=list)
+    response_consumed_fields: dict[str, str] = Field(default_factory=dict)
+    response_unresolved: bool = False
 
 
 class CorsConfig(BaseModel):

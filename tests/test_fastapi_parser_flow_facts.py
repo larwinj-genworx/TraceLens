@@ -53,7 +53,7 @@ class FastAPIParserFlowFactsTest(unittest.TestCase):
             module_path = repo_path / "app.py"
             module_path.write_text(source, encoding="utf-8")
 
-            result = FastAPIParser().parse("service-a", repo_path)
+            result, _file_asts = FastAPIParser().parse("service-a", repo_path)
 
         self.assertEqual(len(result.backend_endpoints), 1)
         endpoint = result.backend_endpoints[0]

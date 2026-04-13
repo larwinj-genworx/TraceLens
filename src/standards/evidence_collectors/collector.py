@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 import logging
 from collections.abc import Callable
+from pathlib import Path
 
 from src.schemas.internal import StaticAnalysisResult
+from src.standards.evidence_collectors.ast_code_index import ASTCodeIndex
 from src.standards.evidence_collectors.auth_evidence import (
     collect_auth_evidence,
     collect_auth_mechanism_evidence,
@@ -61,6 +64,7 @@ class StandardsEvidenceCollector:
         static_results: dict[str, StaticAnalysisResult],
         repo_paths: dict[str, str] | None = None,
         repo_types: dict[str, str] | None = None,
+        repo_file_asts: dict[str, dict[str, tuple[Path, ast.Module]]] | None = None,
     ) -> list[CategoryEvidenceResult]:
         """Run all applicable evidence collectors and return results."""
 
@@ -70,6 +74,11 @@ class StandardsEvidenceCollector:
             return results
 
         repo_index = RepoCodeIndex(repo_paths or {})
+
+        if repo_file_asts:
+            ast_index = ASTCodeIndex.build_multi(repo_file_asts, repo_paths or {})
+        else:
+            ast_index = ASTCodeIndex.build_from_paths(repo_paths or {})
         fastapi_static = _filter_static_results_for_stack(
             static_results,
             stack="fastapi",
@@ -92,6 +101,7 @@ class StandardsEvidenceCollector:
                     fastapi_static,
                     category_id,
                     repo_index,
+                    ast_index=ast_index,
                 )
             if category_result.category != category_id:
                 category_result.category = category_id
@@ -108,6 +118,7 @@ class StandardsEvidenceCollector:
                     react_static,
                     category_id,
                     repo_index,
+                    ast_index=ast_index,
                 )
             if category_result.category != category_id:
                 category_result.category = category_id

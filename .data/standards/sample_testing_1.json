@@ -29,7 +29,7 @@
         "di_style": "fastapi_depends",
         "architecture_pattern": "layered_routes_services_repos",
         "input_sanitization": "pydantic_validators",
-        "secret_management": "dotenv",
+        "secret_management": "config_file",
         "idempotency": "none"
       },
       "folder_structure": {
@@ -42,6 +42,8 @@
         "config": "src/config",
         "tests": "tests"
       },
+      "folder_structure_template": "routes: src/api/rest/routes\nservices: src/core/services\nrepositories: src/data/repositories\nmodels: src/data/models\nschemas: src/schemas\nmiddleware: src/api/middleware\nconfig: src/config\ntests: tests",
+      "folder_structure_format": "kv_map",
       "custom_notes": []
     },
     {
@@ -68,10 +70,13 @@
         "utils": "src/utils",
         "assets": "src/assests"
       },
+      "folder_structure_template": "components: src/components\npages: src/features/components\nservices: src/features/services\nhooks: src/features/hooks\nstore: src/store\ntypes: src/features/types\nutils: src/utils\nassets: src/assests",
+      "folder_structure_format": "kv_map",
       "custom_notes": []
     }
   ],
   "mandatory_rules_version": "mandatory_v1",
-  "created_at": "2026-04-08T10:07:06.187898Z",
-  "updated_at": "2026-04-08T10:07:06.187720Z"
+  "public_paths": [],
+  "created_at": "2026-04-12T14:07:38.095000Z",
+  "updated_at": "2026-04-12T14:07:38.102644Z"
 }

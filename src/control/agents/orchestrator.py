@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import inspect
 import json
 from collections import Counter
@@ -80,6 +81,7 @@ class ValidationOrchestrator:
         assumptions.extend(load_assumptions)
 
         static_results: dict[str, StaticAnalysisResult] = {}
+        repo_file_asts: dict[str, dict[str, tuple[Path, ast.Module]]] = {}
 
         await self._emit(progress_cb, "static_analysis", "Running FastAPI and React static parsers")
         for repo in repos:
@@ -93,7 +95,8 @@ class ValidationOrchestrator:
             fastapi_result = None
             react_result = None
             if repo.repo_type in {RepoType.BACKEND, RepoType.MIXED}:
-                fastapi_result = self.fastapi_parser.parse(repo.name, repo_path=self._path(repo.local_path))
+                fastapi_result, file_asts = self.fastapi_parser.parse(repo.name, repo_path=self._path(repo.local_path))
+                repo_file_asts[repo.name] = file_asts
             if repo.repo_type in {RepoType.FRONTEND, RepoType.MIXED}:
                 react_result = self.react_parser.parse(repo.name, repo_path=self._path(repo.local_path))
 
@@ -217,6 +220,7 @@ class ValidationOrchestrator:
                 static_results,
                 repo_paths=repo_paths,
                 repo_types=repo_types,
+                repo_file_asts=repo_file_asts,
             )
 
             standards_coverage_tracker = EndpointCoverageTracker(resolved_standard)
@@ -779,6 +783,10 @@ class ValidationOrchestrator:
                 "extra_fields",
                 "type_mismatch",
                 "missing_backend_schema",
+                "response_field_missing",
+                "response_field_not_consumed",
+                "response_type_mismatch",
+                "no_response_schema",
             }:
                 provenance.append("contract_validator")
             if issue.type in {"broken_service_connection", "data_flow_break", "data_loss"}:
@@ -835,7 +843,7 @@ class ValidationOrchestrator:
         payload: dict[str, Any] | None = None,
     ) -> None:
         if callback is None:
-            return
+            return None
 
         event = {"stage": stage, "message": message}
         if payload:

@@ -36,7 +36,12 @@
             {
               "value": "session_based",
               "label": "Session-based Authentication",
-              "evidence_markers": ["session", "SessionMiddleware", "session_id", "get_session", "session_backend"],
+              "evidence_markers": [
+                {"type": "import", "name": "SessionMiddleware", "from_module": "starlette"},
+                {"type": "call", "name": "get_session"},
+                {"type": "call", "name": "session_backend"},
+                {"type": "string_literal", "pattern": "session_id"}
+              ],
               "check_strategy": "session_auth"
             },
             {
@@ -74,7 +79,12 @@
             {
               "value": "session_cookie",
               "label": "Session Cookie",
-              "evidence_markers": ["session", "cookie", "set_cookie", "SessionMiddleware", "session_id"],
+              "evidence_markers": [
+                {"type": "import", "name": "SessionMiddleware", "from_module": "starlette"},
+                {"type": "call", "name": "set_cookie"},
+                {"type": "string_literal", "pattern": "session_id"},
+                "cookie"
+              ],
               "check_strategy": "session_cookie_mechanism"
             },
             {
@@ -162,7 +172,12 @@
             {
               "value": "service_layer_check",
               "label": "Service Layer Logic",
-              "evidence_markers": ["authorize", "check_access", "verify_permission", "can_access"],
+              "evidence_markers": [
+                {"type": "call", "name": "authorize"},
+                {"type": "call", "name": "check_access"},
+                {"type": "call", "name": "verify_permission"},
+                {"type": "call", "name": "can_access"}
+              ],
               "check_strategy": "service_layer_authz_enforcement"
             }
           ]
@@ -322,19 +337,38 @@
             {
               "value": "sqlalchemy_sync",
               "label": "SQLAlchemy (Synchronous)",
-              "evidence_markers": ["sqlalchemy", "Session", "create_engine", "sessionmaker", "declarative_base", "Base"],
+              "evidence_markers": [
+                {"type": "import", "name": "sqlalchemy", "from_module": "sqlalchemy"},
+                {"type": "import", "name": "Session", "from_module": "sqlalchemy"},
+                {"type": "import", "name": "create_engine", "from_module": "sqlalchemy"},
+                {"type": "import", "name": "sessionmaker", "from_module": "sqlalchemy"},
+                {"type": "import", "name": "declarative_base", "from_module": "sqlalchemy"},
+                {"type": "call", "name": "sessionmaker"},
+                {"type": "call", "name": "create_engine"}
+              ],
               "check_strategy": "sqlalchemy_sync_db"
             },
             {
               "value": "sqlalchemy_async",
               "label": "SQLAlchemy (Async)",
-              "evidence_markers": ["sqlalchemy", "AsyncSession", "create_async_engine", "async_sessionmaker"],
+              "evidence_markers": [
+                {"type": "import", "name": "sqlalchemy", "from_module": "sqlalchemy"},
+                {"type": "import", "name": "AsyncSession", "from_module": "sqlalchemy"},
+                {"type": "import", "name": "create_async_engine", "from_module": "sqlalchemy"},
+                {"type": "import", "name": "async_sessionmaker", "from_module": "sqlalchemy"},
+                {"type": "call", "name": "create_async_engine"}
+              ],
               "check_strategy": "sqlalchemy_async_db"
             },
             {
               "value": "tortoise_orm",
               "label": "Tortoise ORM",
-              "evidence_markers": ["tortoise", "Model", "fields.", "Tortoise.init"],
+              "evidence_markers": [
+                {"type": "import", "name": "tortoise", "from_module": "tortoise"},
+                {"type": "base_class", "name": "Model", "exclude": ["BaseModel", "BaseSettings"]},
+                {"type": "import", "name": "fields", "from_module": "tortoise"},
+                {"type": "call", "name": "init", "exclude_modules": ["sqlalchemy"]}
+              ],
               "check_strategy": "tortoise_db"
             },
             {
@@ -346,7 +380,16 @@
             {
               "value": "raw_sql",
               "label": "Raw SQL / Database Driver",
-              "evidence_markers": ["execute", "cursor", "fetchone", "fetchall", "psycopg", "asyncpg", "aiomysql"],
+              "evidence_markers": [
+                {"type": "import", "name": "psycopg", "from_module": "psycopg"},
+                {"type": "import", "name": "psycopg2", "from_module": "psycopg2"},
+                {"type": "import", "name": "asyncpg", "from_module": "asyncpg"},
+                {"type": "import", "name": "aiomysql", "from_module": "aiomysql"},
+                {"type": "call", "name": "cursor"},
+                {"type": "call", "name": "fetchone"},
+                {"type": "call", "name": "fetchall"},
+                {"type": "call", "name": "execute"}
+              ],
               "check_strategy": "raw_sql_db"
             },
             {
@@ -428,7 +471,12 @@
             {
               "value": "event_sourcing",
               "label": "Event Sourcing / Audit Events",
-              "evidence_markers": ["event", "audit_log", "emit_event", "EventStore", "audit_trail"],
+              "evidence_markers": [
+                {"type": "call", "name": "audit_log"},
+                {"type": "call", "name": "emit_event"},
+                {"type": "base_class", "name": "EventStore", "exclude": []},
+                {"type": "call", "name": "audit_trail"}
+              ],
               "check_strategy": "event_sourcing_logging"
             },
             {
@@ -466,7 +514,10 @@
             {
               "value": "custom",
               "label": "Custom Logger",
-              "evidence_markers": ["logger", "log"],
+              "evidence_markers": [
+                {"type": "call", "name": "logger"},
+                {"type": "definition", "name": "logger", "def_type": "func_def"}
+              ],
               "check_strategy": "custom_logging_lib"
             }
           ]
@@ -576,7 +627,14 @@
             {
               "value": "graphql",
               "label": "GraphQL",
-              "evidence_markers": ["graphene", "strawberry", "ariadne", "Query", "Mutation", "graphql"],
+              "evidence_markers": [
+                {"type": "import", "name": "graphene", "from_module": "graphene"},
+                {"type": "import", "name": "strawberry", "from_module": "strawberry"},
+                {"type": "import", "name": "ariadne", "from_module": "ariadne"},
+                {"type": "base_class", "name": "Query", "exclude": ["BaseModel"]},
+                {"type": "base_class", "name": "Mutation", "exclude": ["BaseModel"]},
+                {"type": "call", "name": "graphql"}
+              ],
               "check_strategy": "graphql_api"
             },
             {
@@ -614,7 +672,11 @@
             {
               "value": "query_param",
               "label": "Query Parameter",
-              "evidence_markers": ["version=", "api_version", "?v="],
+              "evidence_markers": [
+                {"type": "string_literal", "pattern": "\\?version=|\\?v="},
+                {"type": "keyword_arg", "name": "version", "in_call": "params"},
+                {"type": "call", "name": "api_version"}
+              ],
               "check_strategy": "query_param_versioning"
             },
             {
@@ -698,13 +760,22 @@
             {
               "value": "dependency_injector",
               "label": "dependency-injector Library",
-              "evidence_markers": ["dependency_injector", "Container", "Provider", "Inject"],
+              "evidence_markers": [
+                {"type": "import", "name": "dependency_injector", "from_module": "dependency_injector"},
+                {"type": "base_class", "name": "DeclarativeContainer", "exclude": []},
+                {"type": "import", "name": "Provider", "from_module": "dependency_injector"},
+                {"type": "decorator", "name": "Inject"}
+              ],
               "check_strategy": "di_container"
             },
             {
               "value": "manual_constructor",
               "label": "Manual Constructor Injection",
-              "evidence_markers": ["__init__", "self.", "inject"],
+              "evidence_markers": [
+                {"type": "call", "name": "inject"},
+                {"type": "import", "name": "inject", "from_module": "inject"},
+                {"type": "decorator", "name": "inject"}
+              ],
               "check_strategy": "manual_di"
             }
           ]
@@ -768,7 +839,12 @@
             {
               "value": "custom_sanitizer",
               "label": "Custom Sanitizer Functions",
-              "evidence_markers": ["sanitize", "escape", "clean", "strip_tags"],
+              "evidence_markers": [
+                {"type": "call", "name": "sanitize"},
+                {"type": "call", "name": "strip_tags"},
+                {"type": "call", "name": "clean_html"},
+                {"type": "call", "name": "escape", "exclude_modules": ["xml.sax", "markupsafe", "html"]}
+              ],
               "check_strategy": "custom_sanitization"
             },
             {
@@ -844,7 +920,13 @@
             {
               "value": "distributed_lock",
               "label": "Distributed Lock (Redis, etc.)",
-              "evidence_markers": ["redis", "lock", "acquire_lock", "distributed_lock", "aioredis"],
+              "evidence_markers": [
+                {"type": "import", "name": "redis", "from_module": "redis"},
+                {"type": "import", "name": "aioredis", "from_module": "aioredis"},
+                {"type": "call", "name": "acquire_lock"},
+                {"type": "call", "name": "distributed_lock"},
+                {"type": "call", "name": "lock"}
+              ],
               "check_strategy": "distributed_lock_idempotency"
             },
             {

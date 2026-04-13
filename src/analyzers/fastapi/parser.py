@@ -72,7 +72,7 @@ class FastAPIParser:
       • Apply the resolved prefixes from Phase 1 to produce correct full paths.
     """
 
-    def parse(self, repo_name: str, repo_path: Path) -> StaticAnalysisResult:
+    def parse(self, repo_name: str, repo_path: Path) -> tuple[StaticAnalysisResult, dict[str, tuple[Path, ast.Module]]]:
         endpoints: list[BackendEndpoint] = []
         env_references: set[str] = set()
         hardcoded_urls: set[str] = set()
@@ -170,7 +170,7 @@ class FastAPIParser:
                 sets_request_state=mw_analysis_raw.sets_request_state,
             )
 
-        return StaticAnalysisResult(
+        result = StaticAnalysisResult(
             repo=repo_name,
             backend_endpoints=endpoints,
             env_references=sorted(env_references),
@@ -186,6 +186,7 @@ class FastAPIParser:
                 auth_middleware_analysis=auth_mw_analysis,
             ),
         )
+        return result, file_asts
 
     # ──────────────────────────────────────────────────────────────────────────
     # Phase 1 – repo-wide context builders
