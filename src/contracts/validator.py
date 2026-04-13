@@ -158,7 +158,130 @@ class ContractValidator:
                     }
                 )
 
+            # ---- Response field validation ----
+            response_consumed = call.response_consumed_fields
+            response_schema = {f.name: f for f in endpoint.response_fields}
+
+            if call.response_unresolved:
+                pass  # cannot resolve consumed fields -- skip to avoid false positives
+            elif response_consumed and response_schema:
+                consumed_names = set(response_consumed.keys())
+                schema_names = set(response_schema.keys())
+
+                missing_resp = sorted(consumed_names - schema_names)
+                if missing_resp:
+                    issues.append(
+                        {
+                            "type": "response_field_missing",
+                            "severity": "high",
+                            "service": match.frontend_repo,
+                            "endpoint": endpoint_ref,
+                            "description": (
+                                f"Frontend reads response fields not in backend schema: {missing_resp}."
+                            ),
+                            "file": call.file,
+                            "line": call.line,
+                            "evidence": {
+                                "missing_response_fields": missing_resp,
+                                "backend_response_fields": sorted(schema_names),
+                                "frontend_consumed_fields": sorted(consumed_names),
+                                **backend_location,
+                            },
+                            "impact": "Frontend will receive undefined values causing runtime errors.",
+                            "fix": "Add missing fields to backend response model or remove frontend access.",
+                            "confidence": 0.88,
+                        }
+                    )
+
+                not_consumed = sorted(schema_names - consumed_names)
+                if not_consumed:
+                    issues.append(
+                        {
+                            "type": "response_field_not_consumed",
+                            "severity": "medium",
+                            "service": match.frontend_repo,
+                            "endpoint": endpoint_ref,
+                            "description": (
+                                f"Backend returns fields the frontend never reads: {not_consumed}."
+                            ),
+                            "file": call.file,
+                            "line": call.line,
+                            "evidence": {
+                                "not_consumed_fields": not_consumed,
+                                "backend_response_fields": sorted(schema_names),
+                                "frontend_consumed_fields": sorted(consumed_names),
+                                **backend_location,
+                            },
+                            "impact": "Over-fetching wastes bandwidth and may expose unnecessary data.",
+                            "fix": "Create a leaner response model or consume the fields in the frontend.",
+                            "confidence": 0.82,
+                        }
+                    )
+
+                resp_type_mismatches = self._detect_response_type_mismatches(
+                    response_consumed, response_schema,
+                )
+                if resp_type_mismatches:
+                    issues.append(
+                        {
+                            "type": "response_type_mismatch",
+                            "severity": "high",
+                            "service": match.frontend_repo,
+                            "endpoint": endpoint_ref,
+                            "file": call.file,
+                            "line": call.line,
+                            "description": "Frontend treats response fields as different types than backend declares.",
+                            "evidence": {"mismatches": resp_type_mismatches, **backend_location},
+                            "impact": "Silent type coercion can produce incorrect UI rendering or logic errors.",
+                            "fix": "Align frontend type expectations with backend response schema.",
+                            "confidence": 0.84,
+                        }
+                    )
+
+            elif response_consumed and not response_schema:
+                issues.append(
+                    {
+                        "type": "no_response_schema",
+                        "severity": "medium",
+                        "service": match.frontend_repo,
+                        "endpoint": endpoint_ref,
+                        "description": (
+                            "Backend has no response_model but frontend reads specific response fields."
+                        ),
+                        "file": call.file,
+                        "line": call.line,
+                        "evidence": {
+                            "frontend_consumed_fields": sorted(response_consumed.keys()),
+                            "backend_response_schema": endpoint.response_schema,
+                            **backend_location,
+                        },
+                        "impact": "Undocumented response contract risks silent breakage on backend changes.",
+                        "fix": "Define an explicit response_model on the backend endpoint.",
+                        "confidence": 0.78,
+                    }
+                )
+
         return issues
+
+    def _detect_response_type_mismatches(
+        self, consumed: dict[str, str], schema: dict[str, object],
+    ) -> list[dict]:
+        mismatches: list[dict] = []
+        for field_name, fe_type in consumed.items():
+            schema_field = schema.get(field_name)
+            if schema_field is None:
+                continue
+            backend_type = self._normalize_backend_type(schema_field.field_type)
+            frontend_type = self._normalize_frontend_type(fe_type)
+            if backend_type == "unknown" or frontend_type == "unknown":
+                continue
+            if backend_type != frontend_type:
+                mismatches.append({
+                    "field": field_name,
+                    "frontend_type": frontend_type,
+                    "backend_type": backend_type,
+                })
+        return mismatches
 
     def _detect_type_mismatches(self, payload_fields: dict[str, str], contract_fields: dict[str, object]) -> list[dict]:
         mismatches: list[dict] = []

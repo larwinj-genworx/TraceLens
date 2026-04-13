@@ -128,6 +128,7 @@ class ReactParser:
             env_vars = sorted(set(ENV_PATTERN.findall(url_expr + "\n" + options_expr)))
 
             raw_url = self._strip_wrapping_quotes(url_expr)
+            resp_fields, resp_unresolved = self._extract_response_consumed_fields(content, start)
             calls.append(
                 FrontendCall(
                     service=service,
@@ -140,6 +141,8 @@ class ReactParser:
                     url_unresolved=self._is_bare_identifier(url_expr),
                     headers=headers,
                     env_vars=env_vars,
+                    response_consumed_fields=resp_fields,
+                    response_unresolved=resp_unresolved,
                 )
             )
         return calls
@@ -162,6 +165,7 @@ class ReactParser:
             headers = self._extract_object_as_string_map(headers_expr)
             payload_fields = self._extract_payload_fields(payload_expr)
 
+            resp_fields, resp_unresolved = self._extract_response_consumed_fields(content, call_start)
             calls.append(
                 FrontendCall(
                     service=service,
@@ -174,6 +178,8 @@ class ReactParser:
                     url_unresolved=self._is_bare_identifier(url_expr),
                     headers=headers,
                     env_vars=sorted(set(ENV_PATTERN.findall(url_expr + "\n" + config_expr))),
+                    response_consumed_fields=resp_fields,
+                    response_unresolved=resp_unresolved,
                 )
             )
         return calls
@@ -192,6 +198,7 @@ class ReactParser:
             headers_expr = self._find_option_expression(object_expr, "headers")
             payload_fields = self._extract_payload_fields(data_expr)
 
+            resp_fields, resp_unresolved = self._extract_response_consumed_fields(content, match.start())
             calls.append(
                 FrontendCall(
                     service=service,
@@ -204,6 +211,8 @@ class ReactParser:
                     url_unresolved=self._is_bare_identifier(url_expr),
                     headers=self._extract_object_as_string_map(headers_expr),
                     env_vars=sorted(set(ENV_PATTERN.findall(object_expr))),
+                    response_consumed_fields=resp_fields,
+                    response_unresolved=resp_unresolved,
                 )
             )
         return calls
@@ -260,6 +269,7 @@ class ReactParser:
             env_vars = sorted(set(ENV_PATTERN.findall(url_expr + "\n" + config_expr)))
             payload_fields = self._extract_payload_fields(payload_expr)
 
+            resp_fields, resp_unresolved = self._extract_response_consumed_fields(content, call_start)
             calls.append(
                 FrontendCall(
                     service=service,
@@ -272,6 +282,8 @@ class ReactParser:
                     url_unresolved=self._is_bare_identifier(url_expr),
                     headers=self._extract_object_as_string_map(headers_expr),
                     env_vars=env_vars,
+                    response_consumed_fields=resp_fields,
+                    response_unresolved=resp_unresolved,
                 )
             )
 
@@ -658,6 +670,218 @@ class ReactParser:
             return False
         unquoted = stripped.strip("'\"`")
         return bool(_BARE_IDENTIFIER_RE.match(unquoted)) and "/" not in stripped
+
+    _RESPONSE_NON_DATA_PROPS: frozenset[str] = frozenset({
+        "data", "status", "statusText", "headers", "config", "request",
+        "then", "catch", "finally",
+        "json", "text", "blob", "clone", "formData", "arrayBuffer",
+        "ok", "redirected", "type", "url", "body", "bodyUsed",
+        "map", "filter", "forEach", "reduce", "find", "some", "every",
+        "length", "keys", "values", "entries", "flat", "flatMap",
+        "includes", "indexOf", "slice", "splice", "concat", "join",
+        "sort", "reverse", "push", "pop", "shift", "unshift",
+        "message", "stack", "code", "cause",
+        "toString", "valueOf", "constructor", "prototype",
+        "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable",
+    })
+
+    _RESP_CONTEXT_LINES = 25
+
+    def _extract_response_consumed_fields(
+        self, content: str, call_start: int,
+    ) -> tuple[dict[str, str], bool]:
+        """
+        Extract response fields the frontend reads from this API call.
+
+        Returns ``(fields_dict, is_unresolved)`` where *is_unresolved* is True
+        when the response is captured into a variable but no field access can be
+        resolved statically (avoids false positives).
+        """
+        line_start = content.rfind("\n", 0, call_start) + 1
+        end_idx = self._forward_n_lines(content, call_start, self._RESP_CONTEXT_LINES)
+
+        before_call = content[line_start:call_start]
+        after_call = content[call_start:end_idx]
+
+        # --- Pattern 1: Destructured assignment before the call ---
+        destr_match = re.search(
+            r"(?:const|let|var)\s+(\{.+\})\s*=\s*(?:await\s*)?$",
+            before_call.rstrip(),
+        )
+        if destr_match:
+            fields = self._parse_destructured_response(destr_match.group(1), after_call)
+            if fields:
+                return fields, False
+
+        # --- Pattern 2: Variable assignment + forward field access ---
+        var_match = re.search(
+            r"(?:const|let|var)\s+(\w+)\s*=\s*(?:await\s*)?$",
+            before_call.rstrip(),
+        )
+        if var_match:
+            var_name = var_match.group(1)
+            fields = self._scan_variable_field_access(var_name, after_call)
+            if fields:
+                return fields, False
+            return {}, True
+
+        # --- Pattern 3: Chained .then() callbacks ---
+        fields = self._scan_then_chain_fields(after_call)
+        if fields:
+            return fields, False
+
+        return {}, False
+
+    def _forward_n_lines(self, content: str, start: int, n: int) -> int:
+        idx = start
+        count = 0
+        while idx < len(content) and count < n:
+            if content[idx] == "\n":
+                count += 1
+            idx += 1
+        return idx
+
+    def _parse_destructured_response(
+        self, destructure_expr: str, after_call: str,
+    ) -> dict[str, str]:
+        """Parse ``{ field1, field2 }`` or ``{ data: { field1 } }`` into a field dict."""
+        fields: dict[str, str] = {}
+        inner = destructure_expr.strip().strip("{}")
+
+        nested = re.search(r"\bdata\s*:\s*\{([^}]+)\}", inner)
+        if nested:
+            for part in re.split(r"\s*,\s*", nested.group(1).strip()):
+                key = self._clean_destructured_key(part)
+                if key:
+                    fields[key] = "unknown"
+            return fields
+
+        raw_keys: list[str] = []
+        for part in re.split(r"\s*,\s*", inner.strip()):
+            key = self._clean_destructured_key(part)
+            if key:
+                raw_keys.append(key)
+
+        data_keys = [k for k in raw_keys if k not in self._RESPONSE_NON_DATA_PROPS]
+        meta_keys = [k for k in raw_keys if k in self._RESPONSE_NON_DATA_PROPS]
+
+        if data_keys:
+            for k in data_keys:
+                fields[k] = "unknown"
+            return fields
+
+        if "data" in meta_keys:
+            data_fields = self._extract_dot_access_fields("data", after_call)
+            if data_fields:
+                return data_fields
+
+        return {}
+
+    def _clean_destructured_key(self, part: str) -> str:
+        stripped = part.strip()
+        if not stripped or stripped.startswith("..."):
+            return ""
+        if ":" in stripped:
+            key = stripped.split(":")[0].strip()
+        else:
+            key = stripped
+        return key if re.match(r"^\w+$", key) else ""
+
+    def _scan_variable_field_access(
+        self, var_name: str, after_call: str,
+    ) -> dict[str, str]:
+        """Scan forward from a call site for response field access on *var_name*."""
+        fields: dict[str, str] = {}
+        esc = re.escape(var_name)
+
+        json_reassign = re.search(
+            rf"(?:const|let|var)\s+(\w+)\s*=\s*(?:await\s+)?{esc}\.json\(\)",
+            after_call,
+        )
+        if json_reassign:
+            json_var = json_reassign.group(1)
+            rest = after_call[json_reassign.end():]
+            fields.update(self._extract_dot_access_fields(json_var, rest))
+            for dm in re.finditer(
+                rf"(?:const|let|var)\s*\{{([^}}]+)\}}\s*=\s*{re.escape(json_var)}\b",
+                rest,
+            ):
+                for part in re.split(r"\s*,\s*", dm.group(1).strip()):
+                    key = self._clean_destructured_key(part)
+                    if key and key not in self._RESPONSE_NON_DATA_PROPS:
+                        fields[key] = "unknown"
+            if fields:
+                return fields
+
+        for m in re.finditer(
+            rf"(?:const|let|var)\s*\{{([^}}]+)\}}\s*=\s*(?:await\s+)?{esc}(?:\.data|\.json\(\))?\b",
+            after_call,
+        ):
+            for part in re.split(r"\s*,\s*", m.group(1).strip()):
+                key = self._clean_destructured_key(part)
+                if key and key not in self._RESPONSE_NON_DATA_PROPS:
+                    fields[key] = "unknown"
+        if fields:
+            return fields
+
+        data_fields: dict[str, str] = {}
+        for m in re.finditer(rf"\b{esc}\.data\.(\w+)\b", after_call):
+            field = m.group(1)
+            if field not in self._RESPONSE_NON_DATA_PROPS:
+                data_fields[field] = "unknown"
+        if data_fields:
+            return data_fields
+
+        for m in re.finditer(rf"\b{esc}\.(\w+)\b", after_call):
+            field = m.group(1)
+            if field not in self._RESPONSE_NON_DATA_PROPS:
+                fields[field] = "unknown"
+
+        for m in re.finditer(
+            rf'\b{esc}(?:\.data)?\[(["\'])(\w+)\1\]', after_call,
+        ):
+            fields[m.group(2)] = "unknown"
+
+        return fields
+
+    def _extract_dot_access_fields(self, var_name: str, text: str) -> dict[str, str]:
+        fields: dict[str, str] = {}
+        for m in re.finditer(rf"\b{re.escape(var_name)}\.(\w+)\b", text):
+            field = m.group(1)
+            if field not in self._RESPONSE_NON_DATA_PROPS:
+                fields[field] = "unknown"
+        return fields
+
+    def _scan_then_chain_fields(self, after_call: str) -> dict[str, str]:
+        """Extract fields from chained ``.then()`` callbacks."""
+        fields: dict[str, str] = {}
+
+        for m in re.finditer(r"\.then\s*\(\s*\(?\s*\{([^}]+)\}\s*\)?", after_call):
+            for part in re.split(r"\s*,\s*", m.group(1).strip()):
+                key = self._clean_destructured_key(part)
+                if key and key not in self._RESPONSE_NON_DATA_PROPS:
+                    fields[key] = "unknown"
+
+        if not fields:
+            for m in re.finditer(r"\.then\s*\(\s*\(?\s*(\w+)\s*\)?\s*=>", after_call):
+                then_var = m.group(1)
+                then_end = after_call.find(".then", m.end())
+                catch_end = after_call.find(".catch", m.end())
+                scope_end = min(
+                    then_end if then_end != -1 else len(after_call),
+                    catch_end if catch_end != -1 else len(after_call),
+                )
+                scope = after_call[m.end():scope_end]
+
+                for dm in re.finditer(rf"\b{re.escape(then_var)}\.data\.(\w+)\b", scope):
+                    if dm.group(1) not in self._RESPONSE_NON_DATA_PROPS:
+                        fields[dm.group(1)] = "unknown"
+                if not fields:
+                    for dm in re.finditer(rf"\b{re.escape(then_var)}\.(\w+)\b", scope):
+                        if dm.group(1) not in self._RESPONSE_NON_DATA_PROPS:
+                            fields[dm.group(1)] = "unknown"
+
+        return fields
 
     _AUTH_STORAGE_KEY_MARKERS: frozenset[str] = frozenset({
         "token", "access_token", "refresh_token", "id_token", "auth",

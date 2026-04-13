@@ -193,7 +193,7 @@ class TestAnnotatedDepsExtraction(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir)
             (repo_path / "main.py").write_text(source)
-            result = FastAPIParser().parse("svc", repo_path)
+            result, _file_asts = FastAPIParser().parse("svc", repo_path)
 
         self.assertEqual(len(result.backend_endpoints), 1)
         ep = result.backend_endpoints[0]
@@ -226,7 +226,7 @@ class TestAnnotatedDepsExtraction(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir)
             (repo_path / "main.py").write_text(source)
-            result = FastAPIParser().parse("svc", repo_path)
+            result, _file_asts = FastAPIParser().parse("svc", repo_path)
 
         self.assertEqual(len(result.backend_endpoints), 1)
         ep = result.backend_endpoints[0]
@@ -269,7 +269,7 @@ class TestAnnotatedDepsExtraction(unittest.TestCase):
             (repo_path / "deps.py").write_text(deps_source)
             (repo_path / "routes.py").write_text(routes_source)
             (repo_path / "app.py").write_text(app_source)
-            result = FastAPIParser().parse("svc", repo_path)
+            result, _file_asts = FastAPIParser().parse("svc", repo_path)
 
         endpoints = [ep for ep in result.backend_endpoints if ep.path == "/me"]
         self.assertEqual(len(endpoints), 1)
@@ -293,7 +293,7 @@ class TestAnnotatedDepsExtraction(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir)
             (repo_path / "main.py").write_text(source)
-            result = FastAPIParser().parse("svc", repo_path)
+            result, _file_asts = FastAPIParser().parse("svc", repo_path)
 
         self.assertEqual(len(result.backend_endpoints), 1)
         ep = result.backend_endpoints[0]

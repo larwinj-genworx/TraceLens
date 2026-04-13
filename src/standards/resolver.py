@@ -11,7 +11,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
 
 from src.config.settings import PROJECT_ROOT
 from src.schemas.standards import TraceLensStandard
@@ -19,6 +19,8 @@ from src.schemas.standards import TraceLensStandard
 logger = logging.getLogger(__name__)
 
 CATALOG_PATH = PROJECT_ROOT / "src" / "config" / "standards_catalog" / "questions_v1.json"
+
+MarkerItem = Union[str, dict[str, Any]]
 
 
 @dataclass
@@ -28,11 +30,11 @@ class CategoryResolution:
     category_id: str
     selected_style: str
     check_strategy: str
-    evidence_markers: list[str]
+    evidence_markers: list[MarkerItem]
     label: str = ""
-    all_option_markers: list[str] = field(default_factory=list)
+    all_option_markers: list[MarkerItem] = field(default_factory=list)
     required: bool = False
-    other_options: dict[str, list[str]] = field(default_factory=dict)
+    other_options: dict[str, list[MarkerItem]] = field(default_factory=dict)
     """Maps non-selected option values to their evidence_markers.
 
     Used by conflict detection: if markers from an *other* option are found
@@ -48,7 +50,7 @@ class StackResolution:
     categories: dict[str, CategoryResolution] = field(default_factory=dict)
     folder_expectations: dict[str, str] = field(default_factory=dict)
 
-    def get_markers(self, category_id: str) -> list[str]:
+    def get_markers(self, category_id: str) -> list[MarkerItem]:
         cat = self.categories.get(category_id)
         return cat.evidence_markers if cat else []
 
@@ -195,10 +197,14 @@ class StandardsResolver:
             index[cat_id] = {}
             for opt in cat.get("options", []):
                 index[cat_id][opt["value"]] = opt
-            all_markers: list[str] = []
+            all_markers: list[MarkerItem] = []
+            seen_markers: set[str] = set()
             for opt in cat.get("options", []):
                 for marker in opt.get("evidence_markers", []):
-                    if marker not in all_markers:
+                    key = str(marker)
+                    logger.info(f"Marker: {marker}")
+                    if key not in seen_markers:
+                        seen_markers.add(key)
                         all_markers.append(marker)
             meta[cat_id] = {
                 "required": bool(cat.get("required", False)),
@@ -224,7 +230,7 @@ class StandardsResolver:
                 cat_options = option_index.get(cat_id, {})
                 opt_data = cat_options.get(selected_value)
 
-                other_opts: dict[str, list[str]] = {}
+                other_opts: dict[str, list[MarkerItem]] = {}
                 for ovalue, odata in cat_options.items():
                     if ovalue != selected_value:
                         other_opts[ovalue] = odata.get("evidence_markers", [])

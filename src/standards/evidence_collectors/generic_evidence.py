@@ -5,15 +5,24 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from src.schemas.internal import BackendEndpoint, FrontendCall, StaticAnalysisResult
+from src.standards.evidence_collectors.ast_code_index import (
+    ASTCodeIndex,
+    ASTHit,
+    resolve_marker_hits,
+)
 from src.standards.evidence_collectors.base import CategoryEvidenceResult, Evidence
-from src.standards.resolver import CategoryResolution, ResolvedStandard
+from src.standards.resolver import CategoryResolution, MarkerItem, ResolvedStandard
 
 
 _FASTAPI_EXTENSIONS = (".py",)
 _REACT_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx")
+_IGNORED_DIRS = frozenset({
+    ".git", "node_modules", "dist", "build",
+    ".venv", "venv", "__pycache__", ".pytest_cache",
+})
 _WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _READ_WRITE_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 _PUBLIC_AUTH_PATHS = frozenset({
@@ -145,7 +154,7 @@ class RepoCodeIndex:
                 continue
             if fpath.suffix not in extensions:
                 continue
-            if any(part in {".git", ".venv", "node_modules", "__pycache__"} for part in fpath.parts):
+            if any(part in _IGNORED_DIRS for part in fpath.parts):
                 continue
             try:
                 rel = str(fpath.relative_to(root))
@@ -203,11 +212,53 @@ class RepoCodeIndex:
         return hits
 
 
+def _get_marker_hits(
+    service: str,
+    stack: str,
+    markers: list[MarkerItem],
+    repo_index: RepoCodeIndex,
+    ast_index: ASTCodeIndex | None,
+    *,
+    file_hint: str | None = None,
+) -> list[MarkerHit]:
+    """Dispatch marker queries to AST index (fastapi) or text index (react).
+
+    Returns MarkerHit objects for a uniform interface.
+    """
+    use_ast = ast_index is not None and stack == "fastapi" and _has_structured_markers(markers)
+    if use_ast:
+        ast_hits = resolve_marker_hits(ast_index, service, markers, file_hint=file_hint)
+        return [
+            MarkerHit(file=h.file, line=h.line, marker=h.marker, excerpt=h.excerpt)
+            for h in ast_hits
+        ]
+
+    str_markers = _extract_string_markers(markers)
+    return repo_index.marker_hits(service, stack, str_markers, file_hint=file_hint)
+
+
+def _has_structured_markers(markers: list[MarkerItem]) -> bool:
+    return any(isinstance(m, dict) for m in markers)
+
+
+def _extract_string_markers(markers: list[MarkerItem]) -> list[str]:
+    """Extract plain string markers, converting dicts to their name/pattern."""
+    result: list[str] = []
+    for m in markers:
+        if isinstance(m, str):
+            result.append(m)
+        elif isinstance(m, dict):
+            result.append(m.get("name", m.get("pattern", "")))
+    return [r for r in result if r]
+
+
 def collect_generic_fastapi_category(
     resolved: ResolvedStandard,
     static_results: dict[str, StaticAnalysisResult],
     category_id: str,
     repo_index: RepoCodeIndex,
+    *,
+    ast_index: ASTCodeIndex | None = None,
 ) -> CategoryEvidenceResult:
     category = resolved.fastapi.categories[category_id]
     return _collect_generic_category(
@@ -215,6 +266,7 @@ def collect_generic_fastapi_category(
         category=category,
         static_results=static_results,
         repo_index=repo_index,
+        ast_index=ast_index,
         endpoint_scoped=category_id in _FASTAPI_ENDPOINT_SCOPED,
         category_id=category_id,
     )
@@ -225,6 +277,8 @@ def collect_generic_react_category(
     static_results: dict[str, StaticAnalysisResult],
     category_id: str,
     repo_index: RepoCodeIndex,
+    *,
+    ast_index: ASTCodeIndex | None = None,
 ) -> CategoryEvidenceResult:
     category = resolved.react.categories[category_id]
     return _collect_generic_category(
@@ -232,6 +286,7 @@ def collect_generic_react_category(
         category=category,
         static_results=static_results,
         repo_index=repo_index,
+        ast_index=ast_index,
         endpoint_scoped=category_id in _REACT_CALL_SCOPED,
         category_id=category_id,
     )
@@ -243,6 +298,7 @@ def _collect_generic_category(
     category: CategoryResolution,
     static_results: dict[str, StaticAnalysisResult],
     repo_index: RepoCodeIndex,
+    ast_index: ASTCodeIndex | None = None,
     endpoint_scoped: bool,
     category_id: str,
 ) -> CategoryEvidenceResult:
@@ -328,10 +384,12 @@ def _collect_generic_category(
                             ))
                             continue
 
-                    file_hits = repo_index.marker_hits(
+                    file_hits = _get_marker_hits(
                         service,
                         "fastapi",
                         effective_markers,
+                        repo_index,
+                        ast_index,
                         file_hint=ep.file,
                     )
                     has_ref_match = _endpoint_refs_match(ep, effective_markers)
@@ -341,10 +399,11 @@ def _collect_generic_category(
                         and not has_ref_match
                         and not file_hits
                     ):
+                        dep_str_markers = _extract_string_markers(effective_markers)
                         dependency_hits = repo_index.dependency_chain_marker_hits(
                             service,
                             ep.dependencies,
-                            effective_markers,
+                            dep_str_markers,
                         )
                     matched = bool(file_hits or has_ref_match or dependency_hits)
                     if expect_absence and matched:
@@ -396,10 +455,12 @@ def _collect_generic_category(
             else:
                 for call in static.frontend_calls:
                     call_ref = f"{call.method.upper()} {call.raw_url}"
-                    file_hits = repo_index.marker_hits(
+                    file_hits = _get_marker_hits(
                         service,
                         "react",
                         effective_markers,
+                        repo_index,
+                        ast_index,
                         file_hint=call.file,
                     )
                     call_match = _frontend_call_matches(call, effective_markers)
@@ -452,7 +513,7 @@ def _collect_generic_category(
                         )
     else:
         for service in static_results.keys():
-            hits = repo_index.marker_hits(service, stack, effective_markers)
+            hits = _get_marker_hits(service, stack, effective_markers, repo_index, ast_index)
             matched = bool(hits)
             first = hits[0] if hits else None
             if expect_absence and matched:
@@ -503,6 +564,7 @@ def _collect_generic_category(
         for service in static_results.keys():
             conflict = detect_conflicting_style(
                 category, repo_index, service, stack,
+                ast_index=ast_index,
             )
             if conflict is None:
                 continue
@@ -559,7 +621,7 @@ def _iter_applicable_endpoints(static: StaticAnalysisResult, category_id: str) -
         yield ep
 
 
-def _endpoint_refs_match(endpoint: BackendEndpoint, markers: Iterable[str]) -> bool:
+def _endpoint_refs_match(endpoint: BackendEndpoint, markers: Iterable[MarkerItem]) -> bool:
     text_parts = [
         endpoint.path,
         endpoint.method,
@@ -572,10 +634,11 @@ def _endpoint_refs_match(endpoint: BackendEndpoint, markers: Iterable[str]) -> b
         *endpoint.string_refs,
     ]
     haystack = "\n".join(text_parts)
-    return any(_marker_match(marker, haystack) for marker in markers)
+    str_markers = _extract_string_markers(list(markers))
+    return any(_marker_match(m, haystack) for m in str_markers)
 
 
-def _frontend_call_matches(call: FrontendCall, markers: Iterable[str]) -> bool:
+def _frontend_call_matches(call: FrontendCall, markers: Iterable[MarkerItem]) -> bool:
     text_parts = [
         call.raw_url,
         call.file,
@@ -587,7 +650,8 @@ def _frontend_call_matches(call: FrontendCall, markers: Iterable[str]) -> bool:
         *call.headers.keys(),
     ]
     haystack = "\n".join(text_parts)
-    return any(_marker_match(marker, haystack) for marker in markers)
+    str_markers = _extract_string_markers(list(markers))
+    return any(_marker_match(m, haystack) for m in str_markers)
 
 
 def _build_matcher(marker: str):
@@ -598,8 +662,12 @@ def _build_matcher(marker: str):
             return lambda line: bool(compiled.search(line))
         except re.error:
             pass
-    low = marker.lower()
-    return lambda line: low in line.lower()
+    try:
+        boundary_re = re.compile(rf"\b{re.escape(marker)}\b", re.IGNORECASE)
+        return lambda line: bool(boundary_re.search(line))
+    except re.error:
+        low = marker.lower()
+        return lambda line: low in line.lower()
 
 
 def _marker_match(marker: str, text: str) -> bool:
@@ -666,6 +734,8 @@ def detect_conflicting_style(
     repo_index: RepoCodeIndex,
     service: str,
     stack: str,
+    *,
+    ast_index: ASTCodeIndex | None = None,
 ) -> tuple[str, list[MarkerHit]] | None:
     """Check if markers from a non-selected style option are present in the repo.
 
@@ -675,23 +745,30 @@ def detect_conflicting_style(
     if not category.other_options:
         return None
 
-    selected_markers_set = frozenset(m.lower() for m in category.evidence_markers)
+    selected_keys = frozenset(_marker_key(m) for m in category.evidence_markers)
     best: tuple[str, list[MarkerHit]] | None = None
     best_count = 0
 
     for other_value, other_markers in category.other_options.items():
         if not other_markers:
             continue
-        unique_other = [
+        unique_other: list[MarkerItem] = [
             m for m in other_markers
-            if m.lower() not in selected_markers_set
+            if _marker_key(m) not in selected_keys
         ]
         if not unique_other:
             continue
-        hits = repo_index.marker_hits(service, stack, unique_other)
+        hits = _get_marker_hits(service, stack, unique_other, repo_index, ast_index)
         if len(hits) > best_count:
             best = (other_value, hits)
             best_count = len(hits)
 
     return best
+
+
+def _marker_key(marker: MarkerItem) -> str:
+    """Produce a comparable key for a marker (string or dict)."""
+    if isinstance(marker, str):
+        return marker.lower()
+    return str(marker).lower()
 
